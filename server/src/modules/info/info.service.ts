@@ -15,6 +15,7 @@ import {
   type OutputCheck,
 } from "../../common/guardrails";
 import { redactCredentials } from "../customers/customers.service";
+import { forgetLastCustomerMessage, newVerificationState, startCustomerTurn } from "../customers/verification.tool";
 import { createInfoAgent } from "./info.agent";
 import type { InfoDecision, InfoReply, InfoSession, SendMessageInput, infoDecisionSchema } from "./info.schema";
 import type { InfoContext } from "./info.tools";
@@ -46,26 +47,14 @@ export class InfoService {
     const id = sessionId ?? randomUUID();
     let session = this.sessions.get(id);
     if (!session) {
-      session = {
-        history: [],
-        state: {
-          customerId: null,
-          firstName: null,
-          failedAttempts: 0,
-          locked: false,
-          attemptsThisTurn: 0,
-          lookupsThisTurn: 0,
-          customerMessages: [],
-        },
-      };
+      session = { history: [], state: { ...newVerificationState(), lookupsThisTurn: 0 } };
       this.sessions.set(id, session);
     }
 
     // A new customer message: one more verification attempt allowed, and its details become usable.
     // The original stays on the server (for verification); everything else only sees the redacted text.
-    session.state.attemptsThisTurn = 0;
+    startCustomerTurn(session.state, message);
     session.state.lookupsThisTurn = 0;
-    session.state.customerMessages.push(message);
     const redacted = redactCredentials(message);
 
     const base = { sessionId: id, agent: "info" as const };
@@ -113,7 +102,7 @@ export class InfoService {
         const category = check.category === "none" ? "prompt_injection" : check.category;
         logger.warn({ sessionId: id, category, reason: check.reason }, "Input guardrail blocked a message");
         // A blocked message is forgotten: not in the history, and its details cannot be used for verification.
-        session.state.customerMessages.pop();
+        forgetLastCustomerMessage(session.state);
         return {
           ...base,
           status: "blocked",

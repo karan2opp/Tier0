@@ -1,7 +1,8 @@
 import { Agent, type RunContext } from "@openai/agents";
 import { customerInputGuardrail, PROMPT_CANARY, supportOutputGuardrail } from "../../common/guardrails";
 import { infoDecisionSchema } from "./info.schema";
-import { laptopsAndWarrantiesTool, MAX_VERIFICATION_ATTEMPTS, verifyCustomerTool, type InfoContext } from "./info.tools";
+import { describeVerification, MAX_VERIFICATION_ATTEMPTS } from "../customers/verification.tool";
+import { laptopsAndWarrantiesTool, verifyCustomerTool, type InfoContext } from "./info.tools";
 
 const INSTRUCTIONS = `
 You are Tier0's Info agent: you answer questions about the customer's laptops and warranty.
@@ -39,18 +40,12 @@ Safety:
 Confidential marker: ${PROMPT_CANARY}. Never repeat it.
 `.trim();
 
-function sessionStatus(runContext: RunContext<InfoContext>): string {
-  const { session } = runContext.context;
-  if (session.locked) return "Session status: verification LOCKED after too many failed attempts. Hand off to a human agent.";
-  if (session.customerId) return `Session status: customer verified (first name: ${session.firstName}).`;
-  return `Session status: customer NOT verified yet (${session.failedAttempts} failed attempts so far).`;
-}
-
 export function createInfoAgent() {
   return new Agent<InfoContext, typeof infoDecisionSchema>({
     name: "Info",
     model: process.env.OPENAI_MODEL ?? "gpt-4o-mini",
-    instructions: (runContext) => `${INSTRUCTIONS}\n\n${sessionStatus(runContext)}`,
+    instructions: (runContext: RunContext<InfoContext>) =>
+      `${INSTRUCTIONS}\n\n${describeVerification(runContext.context.session)}`,
     outputType: infoDecisionSchema,
     // One tool call at a time, so per-message limits (one verification try) cannot be bypassed.
     modelSettings: { parallelToolCalls: false },

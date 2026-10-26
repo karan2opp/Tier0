@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { VerificationState } from "../customers/verification.tool";
 
 export const sendMessageSchema = z.object({
   sessionId: z.uuid().optional(),
@@ -22,18 +23,10 @@ export const infoDecisionSchema = z.object({
 
 export type InfoDecision = z.infer<typeof infoDecisionSchema>;
 
-/** Verification state kept by the server, never by the model. */
-export interface InfoSession {
-  customerId: string | null;
-  firstName: string | null;
-  failedAttempts: number;
-  locked: boolean;
-  /** Verification attempts since the customer's last message (max one per message). */
-  attemptsThisTurn: number;
+/** Session state kept by the server, never by the model. */
+export interface InfoSession extends VerificationState {
   /** Laptop and warranty lookups since the customer's last message (max one: it returns everything). */
   lookupsThisTurn: number;
-  /** Everything the customer has typed in this conversation; verification may only use these details. */
-  customerMessages: string[];
 }
 
 export type ReplyStatus = "completed" | "blocked";
