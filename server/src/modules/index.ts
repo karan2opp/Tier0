@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { ApiResponse } from "../common";
+import troubleshootRoutes from "./troubleshoot/troubleshoot.routes";
 
 const router = Router();
 
@@ -7,6 +8,6 @@ router.get("/health", (_req, res) => {
   ApiResponse.ok({ service: "tier0-server" }, "Healthy").send(res);
 });
 
-// Domain modules (e.g. chat/) get mounted here: router.use("/chat", chatRoutes);
+router.use("/troubleshoot", troubleshootRoutes);
 
 export default router;
