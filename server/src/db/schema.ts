@@ -111,6 +111,22 @@ export const ticketEvents = pgTable(
   (table) => [index("ticket_events_ticket_idx").on(table.ticketId)],
 );
 
+/**
+ * Every identity check against a phone number, across all conversations, so failed attempts can be
+ * rate limited per phone number (starting a new chat does not reset the limit).
+ */
+export const verificationAttempts = pgTable(
+  "verification_attempts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** Last 10 digits of the phone number that was tried. */
+    phoneKey: text("phone_key").notNull(),
+    succeeded: boolean("succeeded").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [index("verification_attempts_phone_time_idx").on(table.phoneKey, table.createdAt)],
+);
+
 /* ---------- Relations (for typed nested queries) ---------- */
 
 export const customersRelations = relations(customers, ({ many }) => ({

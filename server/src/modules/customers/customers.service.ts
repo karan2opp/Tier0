@@ -1,92 +1,90 @@
+import { logger } from "../../common";
 import {
-  findCustomerByEmail,
+  countRecentFailedAttempts,
   findCustomerByPhone,
   findSerialNumbers,
   phoneKey,
+  recordVerificationAttempt,
 } from "./customers.repository";
+
+/** Cross-conversation limit: failed attempts allowed per phone number per window. */
+export const PHONE_RATE_LIMIT = { maxFailures: 5, windowMs: 60 * 60 * 1000 } as const;
 
 export type VerificationOutcome =
   | { status: "verified"; customerId: string; firstName: string }
-  /** No phone number or email found in what the customer typed. */
-  | { status: "need_identifier" }
-  /** A phone or email was found, but no second detail to check it against. */
-  | { status: "need_proof" }
-  /** Details matched more than one customer; ask for one account's details only. */
-  | { status: "ambiguous" }
+  /** No phone number found in what the customer typed. */
+  | { status: "need_phone" }
+  /** A phone number was found, but no serial number to check it against. */
+  | { status: "need_serial" }
+  /** Too many failed attempts for this phone number recently, across all conversations. */
+  | { status: "rate_limited" }
   /** Details were given but do not match. Counts as a failed attempt. */
   | { status: "no_match" };
 
-/** Credentials found in the customer's own words. Extracted by code, never copied by the model. */
-interface Credentials {
-  emails: string[];
+/** Credentials found in the customer's own words. Extracted by code; the model never copies them. */
+export interface Credentials {
   phones: string[];
-  serialEndings: string[];
+  serials: string[];
 }
 
 const EMAIL = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi;
 const PHONE = /\+?\d[\d\s-]{8,18}\d/g;
-const TOKEN = /\b[a-z0-9]{4,20}\b/gi;
-/** Caps how many serial endings one verification may try, so it cannot be used to brute-force. */
-const MAX_SERIAL_CANDIDATES = 6;
+/** Serial numbers: 8-24 letters/digits (dashes allowed inside), with at least one digit and one letter. */
+const SERIAL = /\b[a-z0-9](?:[a-z0-9-]{6,22})[a-z0-9]\b/gi;
+/** Caps how many serial numbers one verification may try, so a message full of guesses does not help. */
+const MAX_SERIAL_CANDIDATES = 3;
+
+const isSerialLike = (token: string) => /\d/.test(token) && /[a-z]/i.test(token);
+const normalizeSerial = (serial: string) => serial.replace(/[\s-]/g, "").toUpperCase();
 
 export function extractCredentials(messages: string[]): Credentials {
-  const text = messages.join("\n");
-  const emails = [...new Set((text.match(EMAIL) ?? []).map((e) => e.toLowerCase()))];
-  const withoutEmails = text.replace(EMAIL, " ");
-
+  const text = messages.join("\n").replace(EMAIL, " ");
   const phones = [
-    ...new Set(
-      (withoutEmails.match(PHONE) ?? []).map((p) => p.replace(/\D/g, "")).filter((d) => d.length >= 10).map(phoneKey),
-    ),
+    ...new Set((text.match(PHONE) ?? []).map((p) => p.replace(/\D/g, "")).filter((d) => d.length >= 10).map(phoneKey)),
   ];
-  const withoutContacts = withoutEmails.replace(PHONE, " ");
-
-  // Serial endings: short tokens containing at least one digit (e.g. "4501", "7B3C"), most recent first.
-  const tokens = (withoutContacts.match(TOKEN) ?? []).filter((t) => /\d/.test(t)).map((t) => t.toLowerCase());
-  const serialEndings = [...new Set(tokens.reverse())].slice(0, MAX_SERIAL_CANDIDATES);
-
-  return { emails, phones, serialEndings };
+  // Only real phone numbers (10+ digits) are removed, so a serial typed with dashes stays intact.
+  const withoutPhones = text.replace(PHONE, (match) => (match.replace(/\D/g, "").length >= 10 ? " " : match));
+  const tokens = (withoutPhones.match(SERIAL) ?? []).filter(isSerialLike).map(normalizeSerial);
+  // Most recent first: the latest serial number the customer typed is the one that counts.
+  const serials = [...new Set(tokens.reverse())].slice(0, MAX_SERIAL_CANDIDATES);
+  return { phones, serials };
 }
 
 /**
- * Two-factor check, done entirely in code:
- *  - identifier: a registered phone number or email (finds the customer)
- *  - proof: a DIFFERENT factor: the other contact detail, or the ending of one of their laptop serial numbers
- * The outcome never says which part was wrong, so it cannot be used to probe who is a customer.
+ * Replaces phone numbers, emails, and serial numbers with placeholders. The model, the guardrails, and
+ * the conversation history only ever see the redacted text, so these never leave the server.
+ */
+export function redactCredentials(message: string): string {
+  return message
+    .replace(EMAIL, "[email]")
+    .replace(PHONE, (match) => (match.replace(/\D/g, "").length >= 10 ? "[phone number]" : match))
+    .replace(SERIAL, (match) => (isSerialLike(match) ? "[serial number]" : match));
+}
+
+/**
+ * Two-factor check, done entirely in code: the registered phone number AND the full serial number of one of
+ * that customer's laptops (unique, long, printed under the laptop). The outcome never says which part was wrong.
  */
 export async function verifyFromCustomerMessages(messages: string[]): Promise<VerificationOutcome> {
-  const { emails, phones, serialEndings } = extractCredentials(messages);
-  if (emails.length === 0 && phones.length === 0) return { status: "need_identifier" };
+  const { phones, serials } = extractCredentials(messages);
+  const phone = phones.at(-1);
+  if (!phone) return { status: "need_phone" };
+  if (serials.length === 0) return { status: "need_serial" };
 
-  const candidates = new Map<string, { id: string; fullName: string; email: string; phone: string }>();
-  for (const email of emails) {
-    const customer = await findCustomerByEmail(email);
-    if (customer) candidates.set(customer.id, customer);
-  }
-  for (const phone of phones) {
-    const customer = await findCustomerByPhone(phone);
-    if (customer) candidates.set(customer.id, customer);
+  // Checked before looking anything up, so a locked phone number cannot be probed at all.
+  if ((await countRecentFailedAttempts(phone, PHONE_RATE_LIMIT.windowMs)) >= PHONE_RATE_LIMIT.maxFailures) {
+    logger.warn("Verification blocked: too many recent failed attempts for this phone number");
+    return { status: "rate_limited" };
   }
 
-  const hasSecondFactor = emails.length + phones.length >= 2 || serialEndings.length > 0;
+  const customer = await findCustomerByPhone(phone);
+  const customerSerials = customer ? (await findSerialNumbers(customer.id)).map(normalizeSerial) : [];
+  const matches = customer && serials.some((serial) => customerSerials.includes(serial));
 
-  const verified: Array<{ id: string; fullName: string }> = [];
-  for (const customer of candidates.values()) {
-    const emailMatches = emails.includes(customer.email.toLowerCase());
-    const phoneMatches = phones.includes(phoneKey(customer.phone));
-    let serialMatches = false;
-    if (serialEndings.length > 0) {
-      const serials = (await findSerialNumbers(customer.id)).map((s) => s.toLowerCase());
-      serialMatches = serials.some((serial) => serialEndings.some((ending) => serial.endsWith(ending)));
-    }
-    // Two different factors must match the same customer.
-    const factors = [emailMatches, phoneMatches, serialMatches].filter(Boolean).length;
-    if (factors >= 2) verified.push(customer);
-  }
+  await recordVerificationAttempt(phone, Boolean(matches));
+  if (!customer || !matches) return { status: "no_match" };
 
-  if (verified.length === 1) {
-    return { status: "verified", customerId: verified[0].id, firstName: verified[0].fullName.split(" ")[0] };
-  }
-  if (verified.length > 1) return { status: "ambiguous" };
-  return hasSecondFactor ? { status: "no_match" } : { status: "need_proof" };
+  return { status: "verified", customerId: customer.id, firstName: customer.fullName.split(" ")[0] };
 }
+
+export { phoneKey };

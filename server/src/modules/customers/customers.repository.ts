@@ -1,6 +1,6 @@
-import { eq, sql } from "drizzle-orm";
+import { and, count, eq, gte, sql } from "drizzle-orm";
 import { db } from "../../db/client";
-import { customers, devices } from "../../db/schema";
+import { customers, devices, verificationAttempts } from "../../db/schema";
 
 /** Last 10 digits of a phone number, so "+91 90000 00001" and "9000000001" match. */
 export const phoneKey = (phone: string) => phone.replace(/\D/g, "").slice(-10);
@@ -20,6 +20,25 @@ export async function findCustomerByPhone(phone: string) {
 export async function findSerialNumbers(customerId: string): Promise<string[]> {
   const rows = await db.select({ serial: devices.serialNumber }).from(devices).where(eq(devices.customerId, customerId));
   return rows.map((row) => row.serial);
+}
+
+export async function recordVerificationAttempt(phone: string, succeeded: boolean) {
+  await db.insert(verificationAttempts).values({ phoneKey: phoneKey(phone), succeeded });
+}
+
+/** Failed verification attempts for a phone number within the window, across all conversations. */
+export async function countRecentFailedAttempts(phone: string, windowMs: number): Promise<number> {
+  const [row] = await db
+    .select({ failures: count() })
+    .from(verificationAttempts)
+    .where(
+      and(
+        eq(verificationAttempts.phoneKey, phoneKey(phone)),
+        eq(verificationAttempts.succeeded, false),
+        gte(verificationAttempts.createdAt, new Date(Date.now() - windowMs)),
+      ),
+    );
+  return row?.failures ?? 0;
 }
 
 export async function findDevicesWithWarranties(customerId: string) {
