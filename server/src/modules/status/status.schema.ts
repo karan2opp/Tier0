@@ -1,0 +1,76 @@
+import { z } from "zod";
+import type { VerificationState } from "../customers/verification.tool";
+import type { VisitKind } from "./status.repository";
+
+export const sendMessageSchema = z.object({
+  sessionId: z.uuid().optional(),
+  message: z.string().trim().min(1, "Message is required").max(2000, "Message is too long"),
+});
+export type SendMessageInput = z.infer<typeof sendMessageSchema>;
+
+export const sessionParamsSchema = z.object({ sessionId: z.uuid() });
+export const approvalSchema = z.object({ approve: z.boolean() });
+
+export const handoffTargets = ["troubleshoot", "info", "human_agent", "front_desk"] as const;
+export type HandoffTarget = (typeof handoffTargets)[number];
+
+/** The agent's structured decision, enforced on every turn. */
+export const statusDecisionSchema = z.object({
+  reply: z.string().describe("What to say to the customer now, in plain spoken sentences, no markdown"),
+  nextAction: z
+    .enum(["ask_question", "answered", "handoff"])
+    .describe("ask_question: need details or a choice from the customer. answered: done for now. handoff: another team should take over."),
+  handoffTo: z.enum(handoffTargets).nullable().describe("Who should take over, only when nextAction is handoff"),
+  handoffReason: z.string().nullable().describe("Why, only when nextAction is handoff"),
+});
+export type StatusDecision = z.infer<typeof statusDecisionSchema>;
+
+/** A visit window the agent offered; reschedule_visit only accepts these, by id. */
+export interface OfferedSlot {
+  ticketId: string;
+  ticketNumber: string;
+  kind: VisitKind;
+  start: string;
+  end: string;
+  label: string;
+  /** The customer turn in which it was offered; it can only be chosen in a LATER turn. */
+  offeredInTurn: number;
+}
+
+export interface StatusSession extends VerificationState {
+  /** Increases with every customer message. */
+  turn: number;
+  /** Whether the customer's latest message asks to change a booking (detected by the server, not the model). */
+  customerAskedForChange: boolean;
+  /** Repair lookups since the customer's last message (max one: it returns everything). */
+  lookupsThisTurn: number;
+  /** Slot lookups since the customer's last message (max one). */
+  slotLookupsThisTurn: number;
+  /** Saved changes since the customer's last message (max one). */
+  changesThisTurn: number;
+  /** Slots offered in this conversation, by slot id ("S1", "S2", ...). */
+  offeredSlots: Record<string, OfferedSlot>;
+  slotCounter: number;
+}
+
+export interface PendingChange {
+  callId: string;
+  action: "reschedule_visit";
+  description: string;
+}
+
+export type ReplyStatus = "completed" | "approval_required" | "blocked";
+
+export interface StatusReply {
+  sessionId: string;
+  agent: "status";
+  status: ReplyStatus;
+  reply: string;
+  verified: boolean;
+  toolsRun: string[];
+  approvals?: PendingChange[];
+  decision?: Omit<StatusDecision, "reply">;
+  handoff?: { to: HandoffTarget; reason: string };
+  /** Development only: why a guardrail blocked the message or reply. */
+  debug?: Record<string, unknown>;
+}
