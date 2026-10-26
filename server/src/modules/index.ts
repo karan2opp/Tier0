@@ -1,12 +1,17 @@
 import { Router } from "express";
-import { ApiResponse } from "../common";
+import { ApiResponse, asyncHandler } from "../common";
+import { isDatabaseUp } from "../db/client";
 import troubleshootRoutes from "./troubleshoot/troubleshoot.routes";
 
 const router = Router();
 
-router.get("/health", (_req, res) => {
-  ApiResponse.ok({ service: "tier0-server" }, "Healthy").send(res);
-});
+router.get(
+  "/health",
+  asyncHandler(async (_req, res) => {
+    const database = (await isDatabaseUp()) ? "up" : "down";
+    ApiResponse.ok({ service: "tier0-server", database }, database === "up" ? "Healthy" : "Degraded").send(res);
+  }),
+);
 
 router.use("/troubleshoot", troubleshootRoutes);
 

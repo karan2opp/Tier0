@@ -1,0 +1,23 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: tier0-db
+    restart: unless-stopped
+    environment:
+      # Local development only; the port below is bound to localhost.
+      POSTGRES_USER: tier0
+      POSTGRES_PASSWORD: tier0_local_dev
+      POSTGRES_DB: tier0
+    ports:
+      # 5434 because 5432/5433 are commonly taken by locally installed Postgres servers.
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - tier0-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tier0 -d tier0"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  tier0-db-data:
