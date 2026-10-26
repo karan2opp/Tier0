@@ -1,14 +1,15 @@
 import { Router } from "express";
-import { asyncHandler, validate } from "../../common";
+import { asyncHandler, chatRateLimit, validate } from "../../common";
 import { troubleshootController } from "./troubleshoot.controller";
 import { approvalSchema, runToolSchema, sendMessageSchema, sessionParamsSchema } from "./troubleshoot.schema";
 
 const router = Router();
 
 router.get("/tools", asyncHandler(troubleshootController.listTools));
-router.post("/messages", validate(sendMessageSchema), asyncHandler(troubleshootController.sendMessage));
+router.post("/messages", chatRateLimit, validate(sendMessageSchema), asyncHandler(troubleshootController.sendMessage));
 router.post(
   "/sessions/:sessionId/approval",
+  chatRateLimit,
   validate(sessionParamsSchema, "params"),
   validate(approvalSchema),
   asyncHandler(troubleshootController.respondToApproval),
