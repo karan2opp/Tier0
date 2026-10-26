@@ -1,5 +1,6 @@
 import type { ErrorRequestHandler, RequestHandler } from "express";
 import { AppError, BadRequestError, NotFoundError } from "../errors";
+import { logger } from "../logger";
 import { ApiResponse } from "../response";
 
 /** Catch-all for unmatched routes. Mount after all routers. */
@@ -8,7 +9,9 @@ export const notFoundHandler: RequestHandler = (req, _res, next) => {
 };
 
 /** Turns anything thrown into the standard ApiResponse envelope. Mount last. */
-export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
+export const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
+  // Request-scoped logger from pino-http (carries the request ID); app logger as fallback.
+  const log = req.log ?? logger;
   let appError: AppError;
 
   if (err instanceof AppError) {
@@ -17,12 +20,12 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
     appError = new BadRequestError("Malformed request body", { cause: err });
   } else {
     // Unexpected bug: log everything, tell the client nothing.
-    console.error("[unhandled error]", err);
+    log.error({ err }, "Unhandled error");
     appError = new AppError("Something went wrong", 500, { code: "INTERNAL_ERROR", cause: err }, false);
   }
 
   if (appError.isOperational) {
-    console.warn(`[${appError.code}] ${appError.message}`);
+    log.warn({ code: appError.code, statusCode: appError.statusCode }, appError.message);
   }
 
   ApiResponse.fromError(appError).send(res);
