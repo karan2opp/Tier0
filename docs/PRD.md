@@ -361,12 +361,12 @@ tier0/
       db/                  # schema, seed data (customers, devices, tickets)
       llm/                 # provider abstraction
     eval/                  # query sets, runner
-  web/                     # React + Vite: chat/voice, trace, engineer queue
+  client/                  # React + Vite: chat/voice, trace, engineer queue
   helper/                  # P1: WebSocket client, allowlist, localhost consent page
   scenarios/               # simulated machine states (*.yaml)
 ```
 
-A simple two-folder layout (`server/`, `web/`) keeps setup fast; shared Zod schemas can move into a `shared/` folder if the helper is built.
+A simple npm-workspaces monorepo with two folders (`client/`, `server/`) keeps setup fast; `npm run dev` at the root starts both. Shared Zod schemas can move into a `shared/` folder if the helper is built.
 
 ## 18. Build plan (one-day scope; adjust to the deadline)
 
