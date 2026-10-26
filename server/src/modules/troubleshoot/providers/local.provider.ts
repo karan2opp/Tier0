@@ -1,6 +1,7 @@
 import type { z } from "zod";
 import { logger, ValidationError } from "../../../common";
 import { runPowerShell } from "../runtime/powershell";
+import { annotateToolOutput } from "../tools/annotations";
 import { getTool } from "../tools/definitions";
 import type { ToolProvider } from "./provider";
 
@@ -29,7 +30,7 @@ export class LocalToolProvider implements ToolProvider {
     try {
       const result = await runPowerShell(tool.buildScript(parsed.data), { label: tool.name, timeoutMs: tool.timeoutMs });
       logger.info({ tool: tool.name, provider: this.name, durationMs: elapsed(startedAt) }, "Tool succeeded");
-      return result;
+      return annotateToolOutput(tool.name, result);
     } catch (err) {
       logger.warn({ tool: tool.name, provider: this.name, durationMs: elapsed(startedAt) }, "Tool failed");
       throw err;
