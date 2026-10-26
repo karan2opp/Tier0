@@ -10,7 +10,13 @@ import {
   type RunToolApprovalItem,
 } from "@openai/agents";
 import { AppError, ConflictError, logger, NotFoundError, ServiceUnavailableError } from "../../common";
-import type { InputCategory, InputCheck, OutputCheck } from "../../common/guardrails";
+import {
+  BLOCKED_INPUT_REPLIES,
+  BLOCKED_OUTPUT_REPLY,
+  devGuardrailInfo,
+  type InputCheck,
+  type OutputCheck,
+} from "../../common/guardrails";
 import { LocalToolProvider } from "./providers/local.provider";
 import type { ToolProvider } from "./providers/provider";
 import { scrub } from "./runtime/scrub";
@@ -28,17 +34,6 @@ import type {
 import { getTool, toolDefinitions } from "./tools/definitions";
 
 const MAX_TURNS = 10;
-
-const BLOCKED_INPUT_REPLIES: Record<Exclude<InputCategory, "none">, string> = {
-  prompt_injection:
-    "I can only help with laptop support, and I can't change how I work. What problem are you having with your laptop?",
-  harmful_request:
-    "I can't run custom commands or do anything that could harm your laptop or data. I can run safe, read-only checks, or connect you to an engineer.",
-  off_topic: "I'm Tier0's laptop support assistant, so I can only help with your laptop. What's going on with it?",
-};
-
-const BLOCKED_OUTPUT_REPLY =
-  "Sorry, I couldn't give a safe answer to that. Let me connect you with a human engineer who can help.";
 
 const DECLINED_MESSAGE =
   "The customer declined this check. Do not run it again. Continue with steps they can do themselves.";
@@ -284,11 +279,6 @@ function safeGetTool(name: string) {
   } catch {
     return undefined;
   }
-}
-
-/** Why a guardrail blocked something, returned to the client in development only (never in production). */
-function devGuardrailInfo(info: Record<string, unknown>) {
-  return process.env.NODE_ENV === "production" ? {} : { debug: info };
 }
 
 function approvalPrompt(approvals: PendingApproval[]): string {
