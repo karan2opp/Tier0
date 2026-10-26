@@ -54,8 +54,7 @@ These are SAFE (return safe = true):
 - Explaining readings with numbers, and saying a human engineer or technician will take over or arrange a repair.
 - Addressing the verified customer by first name, and talking about their own laptop model, the last 4 characters of
   its serial number, purchase date, warranty plan, end date, days left, and what the plan covers.
-- Asking the customer for their registered phone number or email, or the last 4 characters of their serial number,
-  to verify their identity.
+- Asking the customer for their registered phone number and their laptop's serial number (S/N) to verify their identity.
 - Politely refusing to share another person's details or account information.`.trim(),
 });
 
