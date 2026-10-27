@@ -8,7 +8,15 @@ import {
   type RunState,
   type RunToolApprovalItem,
 } from "@openai/agents";
-import { AppError, ConflictError, logger, NotFoundError, ServiceUnavailableError, SupersededError } from "../../common";
+import {
+  AppError,
+  compactHistory,
+  ConflictError,
+  logger,
+  NotFoundError,
+  ServiceUnavailableError,
+  SupersededError,
+} from "../../common";
 import {
   BLOCKED_INPUT_REPLIES,
   BLOCKED_OUTPUT_REPLY,
@@ -86,6 +94,12 @@ export class TroubleshootService {
       session.caseState = newCase();
       session.handoff = undefined;
     }
+    // A human was offered but the customer carried on with the engineer (another question, or a new problem):
+    // the case continues. If they had said yes, the conversation would have transferred them instead.
+    if (session.caseState.status === "escalated") {
+      // Counted afresh, so a long first investigation leaves room for checks on the new problem.
+      Object.assign(session.caseState, { status: "investigating", checksRun: 0, fixAttempts: 0, fixesTried: [] });
+    }
     if (isClosed(session.caseState)) {
       throw new ConflictError(`This case is already ${session.caseState.status}. Start a new conversation for a new problem.`, {
         details: { handoff: session.handoff },
@@ -100,7 +114,7 @@ export class TroubleshootService {
     // A new customer message starts a new "turn" for the per-reply check limit.
     session.caseState.checksThisTurn = 0;
     session.caseState.checksBlockedThisTurn = false;
-    const input: AgentInputItem[] = [...session.history, ...briefing, { role: "user", content: message }];
+    const input: AgentInputItem[] = [...compactHistory(session.history), ...briefing, { role: "user", content: message }];
     const context: TroubleshootContext = { caseState: session.caseState };
     // Safe to retry: no check can run before the customer approves it, so a fresh run has no side effects.
     return this.execute(id, session, () => run(this.agent, input, { context, maxTurns: MAX_TURNS, signal }), {

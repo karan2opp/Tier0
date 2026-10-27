@@ -64,8 +64,18 @@ export interface CaseState {
   findings: string[];
   fixesTried: string[];
   likelyCause: string | null;
-  /** Hardware problems found by the deterministic rules; any entry forces escalation. */
+  /**
+   * Hardware problems found by the deterministic rules. They never block the case: the customer is told, their
+   * actual problem is still worked on, and a human engineer is offered for the repair.
+   */
   hardwareIssues: string[];
+  /** Hardware problems the customer has already been told about. */
+  hardwareMentioned: string[];
+  /**
+   * A human engineer has been offered. If the customer carries on with the engineer instead (another question or
+   * a new problem), the case continues normally and the hardware rule no longer forces escalation every reply.
+   */
+  humanOffered: boolean;
 }
 
 export interface Handoff {

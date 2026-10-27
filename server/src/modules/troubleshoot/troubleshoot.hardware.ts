@@ -1,8 +1,8 @@
 import { asList, asRecord } from "./tools/readings";
 
 /**
- * Deterministic hardware rules applied to real tool readings. Any hit means the problem needs a
- * repair or replacement, so the case must go to a human engineer, whatever the model decides.
+ * Deterministic hardware rules applied to real tool readings. Any hit means that part needs a repair or
+ * replacement: the customer is always told, and a human engineer is always offered for it.
  */
 export const HARDWARE_THRESHOLDS = {
   /** Below this, the battery holds too little charge and should be replaced. */

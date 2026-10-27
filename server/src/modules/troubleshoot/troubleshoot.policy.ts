@@ -26,6 +26,8 @@ export function newCase(): CaseState {
     fixesTried: [],
     likelyCause: null,
     hardwareIssues: [],
+    hardwareMentioned: [],
+    humanOffered: false,
   };
 }
 
@@ -34,7 +36,18 @@ export function isClosed(state: CaseState) {
 }
 
 /** Short status line injected into the agent's instructions every turn. */
+/** Why the diagnostic checks are not available right now, or null if they are. */
+export function whyNoChecks(state: CaseState): string | null {
+  if (!state.checkOffered) return null;
+  if (state.checksRun >= CASE_LIMITS.maxChecks) return `the limit of ${CASE_LIMITS.maxChecks} checks for this case was reached`;
+  if (state.checksThisTurn >= CASE_LIMITS.maxChecksPerTurn || state.checksBlockedThisTurn) {
+    return "enough checks were run for this reply; answer the customer now";
+  }
+  return null;
+}
+
 export function describeCase(state: CaseState): string {
+  const noChecks = whyNoChecks(state);
   return [
     `Case status: ${state.status}.`,
     state.checkOffered
@@ -43,8 +56,20 @@ export function describeCase(state: CaseState): string {
     `Checks run: ${state.checksRun} of ${CASE_LIMITS.maxChecks} for this case, ${state.checksThisTurn} of ${CASE_LIMITS.maxChecksPerTurn} for this reply.`,
     `Fix attempts: ${state.fixAttempts} of ${CASE_LIMITS.maxFixAttempts}.`,
     state.fixesTried.length ? `Fixes already tried: ${state.fixesTried.join("; ")}.` : "",
-    state.hardwareIssues.length
-      ? `HARDWARE PROBLEM DETECTED: ${state.hardwareIssues.join("; ")}. You must use escalate_to_human now.`
+    // Older check results are shortened in the history, so the findings live here.
+    state.findings.length ? `Findings so far: ${state.findings.slice(-10).join("; ")}.` : "",
+    state.hardwareIssues.length && !state.humanOffered
+      ? `Hardware problem found: ${state.hardwareIssues.join("; ")}. If it is the cause of what the customer called ` +
+        "about, explain it and use escalate_to_human (they are asked first). If it is unrelated, keep solving their " +
+        "actual problem with checks as usual; a human engineer will be offered for the repair once that is done."
+      : "",
+    state.humanOffered
+      ? `A human engineer was already offered (${state.hardwareIssues.join("; ") || "earlier in this call"}) and the ` +
+        "customer chose to carry on with you. Help with what they ask now, including new problems. When you are done, " +
+        "you may remind them the transfer to a human is still available."
+      : "",
+    noChecks
+      ? `Checks are NOT available right now: ${noChecks}. Do not promise to run one; say so and give steps they can do themselves.`
       : "",
   ]
     .filter(Boolean)
@@ -59,7 +84,6 @@ export function canRunChecks(state: CaseState): boolean {
   return (
     state.checkOffered &&
     !state.checksBlockedThisTurn &&
-    state.hardwareIssues.length === 0 &&
     state.checksRun < CASE_LIMITS.maxChecks &&
     state.checksThisTurn < CASE_LIMITS.maxChecksPerTurn
   );
@@ -94,10 +118,26 @@ export function vetoChecks(state: CaseState, requested: number): string | null {
 }
 
 const FORCED_ESCALATION_REPLY =
-  "We've tried a few things without fixing it, so I'm connecting you with a human engineer. They'll get everything we found, so you won't have to repeat yourself.";
+  "We've tried a few things without fixing it, so a human engineer is the best next step. They'll get everything we found, so you won't have to repeat yourself. Would you like me to transfer you to a human engineer now, or is there anything else you'd like to ask first?";
 
-const hardwareEscalationReply = (issues: string[]) =>
-  `I found a hardware problem: ${issues[0].split(":")[0].toLowerCase()}. That needs a repair or replacement, so I'm handing you to a human engineer who can arrange it. They'll get everything we found, so you won't have to repeat yourself.`;
+/** "Battery health is 61.5%, below 70%: the battery needs replacing" -> one plain sentence for the customer. */
+function hardwareSentence(issue: string): string {
+  const [what, consequence] = issue.split(": ");
+  const lower = what.charAt(0).toLowerCase() + what.slice(1);
+  return `I also noticed that ${lower}${consequence ? `, so ${consequence}` : ""}. A human engineer can arrange the repair.`;
+}
+
+/** Adds a note to a reply, before its closing question if it has one, so the reply still ends by asking. */
+function addBeforeQuestion(reply: string, note: string): string {
+  const text = reply.trim();
+  const question = text.match(/[^.!?]*\?\s*$/);
+  if (!question || question.index === 0) return `${text} ${note}`;
+  return `${text.slice(0, question.index).trim()} ${note} ${question[0].trim()}`;
+}
+
+/** Whether the reply already tells the customer about this hardware problem. */
+const mentions = (reply: string, issue: string) =>
+  (/battery/i.test(issue) && /battery/i.test(reply)) || (/disk/i.test(issue) && /\b(disk|drive|storage)\b/i.test(reply));
 
 /** The model's confidence can never exceed what the evidence supports. */
 function calibrateConfidence(state: CaseState, decision: TroubleshootDecision): number {
@@ -130,11 +170,22 @@ export function applyDecision(
   let final = decision;
   const isFinal = ["resolved", "escalate_to_human", "other_topic", "done"].includes(decision.nextAction);
 
-  if (state.hardwareIssues.length > 0 && decision.nextAction !== "resolved") {
-    // Rule: worn or failing hardware always goes to a human for repair or replacement.
+  // Rule: a hardware problem is always told to the customer once, but never takes over the call. The engineer keeps
+  // working on what the customer actually called about.
+  const untold = state.hardwareIssues.filter((issue) => !state.hardwareMentioned.includes(issue));
+  if (untold.length > 0) {
+    const extra = untold.filter((issue) => !mentions(decision.reply, issue)).map(hardwareSentence);
+    if (extra.length > 0) final = { ...final, reply: addBeforeQuestion(final.reply, extra.join(" ")) };
+    state.hardwareMentioned = mergeUnique(state.hardwareMentioned, untold);
+  }
+
+  // Their problem is sorted (or they are done) but a part still needs repairing: offer the human engineer now,
+  // before they go. Asked once; they are only transferred if they say yes.
+  const finishing = decision.nextAction === "resolved" || decision.nextAction === "done";
+  if (finishing && state.hardwareIssues.length > 0 && !state.humanOffered) {
     final = {
-      ...decision,
-      reply: decision.nextAction === "escalate_to_human" ? decision.reply : hardwareEscalationReply(state.hardwareIssues),
+      ...final,
+      reply: `${final.reply.trim()} Before you go, the ${state.hardwareIssues.some((i) => /battery/i.test(i)) ? "battery" : "disk"} still needs a repair, which a human engineer can arrange.`,
       nextAction: "escalate_to_human",
       escalationReason: `Hardware repair needed: ${state.hardwareIssues.join("; ")}`,
     };
@@ -173,6 +224,7 @@ export function applyDecision(
   }
   if (final.nextAction === "escalate_to_human") {
     state.status = "escalated";
+    state.humanOffered = true;
     return {
       decision: final,
       handoff: { to: "human_engineer", reason: final.escalationReason ?? "Needs a human engineer", summary },
