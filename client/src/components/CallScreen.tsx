@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import type { AgentName, ConversationReply } from "../api";
+import type { AgentName, ConversationReply, FillerKind } from "../api";
 import { useConversation } from "../hooks/useConversation";
 import { useMediaQuery } from "../hooks/useMediaQuery";
 import { useVoice, type VoiceEngine } from "../hooks/useVoice";
@@ -10,6 +10,14 @@ import { Transcript } from "./Transcript";
 
 const YES = /^(yes|yeah|yep|yup|sure|ok|okay|go ahead|allow|confirm|please do|do it|haan|ha)\b/i;
 const NO = /^(no|nope|nah|don'?t|do not|cancel|deny|not now|stop)\b/i;
+/** Looks like a phone number or serial number: the front desk will be verifying. */
+const CREDENTIAL_LIKE = /\d[\d\s-]{8,}\d|\b(?=[a-z0-9]*\d)(?=[a-z0-9]*[a-z])[a-z0-9]{8,}\b/i;
+/** How long a pause before the agent says "let me check that" (quick answers arrive before this). */
+const FILLER_DELAY_MS = 700;
+/** When an answer is taking unusually long, one more "still on it". */
+const STILL_DELAY_MS = 7000;
+/** A moment after the goodbye before the call screen closes. */
+const END_AFTER_GOODBYE_MS = 1800;
 
 type Conversation = ReturnType<typeof useConversation>;
 
@@ -32,6 +40,8 @@ export function CallScreen({
   const [speakAloud, setSpeakAloud] = useState(voice);
   const [stageAgent, setStageAgent] = useState<AgentName>("front_desk");
   const [caption, setCaption] = useState<string | null>(null);
+  /** Set during the short pause while the call is put through to another agent. */
+  const [transferring, setTransferring] = useState(false);
   const [tab, setTab] = useState<"transcript" | "case">("transcript");
   const [draft, setDraft] = useState("");
   const [elapsed, setElapsed] = useState(0);
@@ -49,18 +59,58 @@ export function CallScreen({
   });
   const voiceRef = useRef(voiceApi);
   voiceRef.current = voiceApi;
+  const endCallRef = useRef<() => void>(() => {});
+
+  const fillerTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const pendingRequests = useRef(0);
+  const clearFillers = () => {
+    fillerTimers.current.forEach(clearTimeout);
+    fillerTimers.current = [];
+  };
+
+  /** Waits for an answer; if it takes a moment, the agent says a short filler so the line never goes quiet. */
+  const withFillers = async <T,>(kind: FillerKind, request: Promise<T>): Promise<T> => {
+    clearFillers();
+    if (voice && live.current.speakAloud) {
+      const agent = () => live.current.state.activeAgent;
+      fillerTimers.current = [
+        setTimeout(() => voiceRef.current.fill(kind, agent()), kind === "checking" ? 300 : FILLER_DELAY_MS),
+        setTimeout(() => voiceRef.current.fill("still", agent()), STILL_DELAY_MS),
+      ];
+    }
+    pendingRequests.current += 1;
+    try {
+      return await request;
+    } finally {
+      pendingRequests.current -= 1;
+      if (pendingRequests.current === 0) clearFillers();
+    }
+  };
+
+  /** "checking" while an allowed diagnostic runs on the laptop, otherwise "thinking". */
+  const answerKind = (approve: boolean): FillerKind =>
+    approve && live.current.state.approval?.agent === "troubleshoot" ? "checking" : "thinking";
 
   /** Plays a reply aloud (or just shows it when muted), then hands the turn back to the customer. */
   const play = useCallback(
     async (reply: ConversationReply | null) => {
       if (!reply || live.current.ended) return;
       const show = (agent: AgentName, text: string) => {
+        setTransferring(false);
         setStageAgent(agent);
         setCaption(text);
       };
 
       if (live.current.speakAloud && reply.messages.length > 0) {
-        const result = await voiceRef.current.speak(reply.messages, (line) => show(line.agent, line.text));
+        const result = await voiceRef.current.speak(
+          reply.messages,
+          (line) => show(line.agent, line.text),
+          (to) => {
+            setStageAgent(to);
+            setTransferring(true);
+          },
+        );
+        setTransferring(false);
         if (live.current.ended) return;
         if (result.outcome === "interrupted") {
           // The customer is already talking; the voice engine is capturing what they say.
@@ -74,6 +124,11 @@ export function CallScreen({
       }
 
       setStageAgent(reply.activeAgent);
+      if (reply.ended) {
+        // The customer said goodbye: close the call after a moment, like hanging up.
+        setTimeout(() => endCallRef.current(), END_AFTER_GOODBYE_MS);
+        return;
+      }
       if (voice && reply.status !== "with_human") voiceRef.current.listen();
     },
     [markInterrupted, voice],
@@ -81,13 +136,13 @@ export function CallScreen({
 
   handleUtterance.current = async (text: string, interrupted: boolean) => {
     if (live.current.state.approval) {
-      if (YES.test(text)) return play(await answer(true));
-      if (NO.test(text)) return play(await answer(false));
+      if (YES.test(text)) return play(await withFillers(answerKind(true), answer(true)));
+      if (NO.test(text)) return play(await withFillers("thinking", answer(false)));
       setCaption('Please say "yes" or "no", or use the buttons.');
       if (voice) voiceRef.current.listen();
       return;
     }
-    play(await send(text, interrupted));
+    play(await withFillers(CREDENTIAL_LIKE.test(text) ? "verifying" : "thinking", send(text, interrupted)));
   };
 
   // Greet once (StrictMode mounts twice in development; the ref keeps it to one).
@@ -115,7 +170,7 @@ export function CallScreen({
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     const text = draft.trim();
-    if (!text || busy) return;
+    if (!text) return;
     setDraft("");
     const wasSpeaking = voiceApi.speaking;
     if (wasSpeaking) voiceApi.interrupt();
@@ -145,22 +200,26 @@ export function CallScreen({
 
   const respond = async (approve: boolean) => {
     voiceApi.stopAll();
-    play(await answer(approve));
+    play(await withFillers(answerKind(approve), answer(approve)));
   };
 
   const endCall = () => {
     live.current.ended = true;
+    clearFillers();
     voiceApi.stopAll();
     onEnd();
   };
+  endCallRef.current = endCall;
 
   const withHuman = state.status === "with_human";
   const phase: Phase = !state.sessionId
     ? "connecting"
     : withHuman && !voiceApi.speaking
       ? "with_human"
-      : busy || voiceApi.transcribing
-        ? "thinking"
+      : transferring
+        ? "transferring"
+        : busy || voiceApi.transcribing
+          ? "thinking"
         : voiceApi.speaking
           ? "speaking"
           : voiceApi.listening
@@ -205,6 +264,7 @@ export function CallScreen({
             phase={phase}
             caption={caption}
             interim={voiceApi.interim}
+            note={voiceApi.fillerText}
             hearing={voiceApi.hearing}
             approval={state.approval}
             onAnswer={respond}
@@ -245,7 +305,7 @@ export function CallScreen({
               type="button"
               className={`mic-btn ${voiceApi.listening ? "on" : ""} ${voiceApi.hearing ? "hearing" : ""}`}
               onClick={toggleMic}
-              disabled={busy || withHuman}
+              disabled={withHuman}
               aria-label={voiceApi.speaking ? "Interrupt and talk" : voiceApi.listening ? "Stop listening" : "Talk"}
               title={voiceApi.speaking ? "Interrupt and talk" : voiceApi.listening ? "Stop listening" : "Tap to talk"}
             >
@@ -260,14 +320,16 @@ export function CallScreen({
                 ? "A human agent will join shortly..."
                 : state.approval
                   ? 'Type "yes" or "no", or use the buttons above'
-                  : voiceApi.listening
-                    ? "Listening... or type here"
+                  : busy
+                    ? "Thinking... you can keep talking or typing"
+                    : voiceApi.listening
+                      ? "Listening... or type here"
                     : "Type your message"
             }
             maxLength={2000}
             aria-label="Message"
           />
-          <button type="submit" className="send-btn" disabled={!draft.trim() || busy} aria-label="Send">
+          <button type="submit" className="send-btn" disabled={!draft.trim()} aria-label="Send">
             <Icon name="send" size={18} />
           </button>
         </form>

@@ -3,7 +3,15 @@ import type { AgentName, ApprovalItem } from "../api";
 import { ApprovalCard } from "./ApprovalCard";
 import { Icon } from "./Icon";
 
-export type Phase = "connecting" | "speaking" | "listening" | "thinking" | "waiting" | "approval" | "with_human";
+export type Phase =
+  | "connecting"
+  | "transferring"
+  | "speaking"
+  | "listening"
+  | "thinking"
+  | "waiting"
+  | "approval"
+  | "with_human";
 
 const PHASE_LABEL: Record<Phase, string> = {
   connecting: "Connecting",
@@ -13,6 +21,7 @@ const PHASE_LABEL: Record<Phase, string> = {
   waiting: "Your turn",
   approval: "Waiting for your OK",
   with_human: "Transferring to a person",
+  transferring: "Connecting",
 };
 
 export function AgentStage({
@@ -20,6 +29,7 @@ export function AgentStage({
   phase,
   caption,
   interim,
+  note,
   hearing,
   approval,
   onAnswer,
@@ -30,6 +40,8 @@ export function AgentStage({
   phase: Phase;
   caption: string | null;
   interim: string;
+  /** What the agent is saying while it works ("Let me check that for you."). */
+  note?: string | null;
   /** The customer's voice is being picked up right now. */
   hearing: boolean;
   approval: { agent: AgentName; items: ApprovalItem[] } | null;
@@ -79,14 +91,22 @@ export function AgentStage({
             <span>You</span>
             {interim || (hearing ? "Hearing you..." : "Go ahead, I'm listening...")}
           </p>
+        ) : phase === "transferring" ? (
+          <p className="caption-transfer">Connecting you to our {meta.name.toLowerCase()}...</p>
+        ) : phase === "thinking" && (hearing || interim) ? (
+          <p className="caption-you">
+            <span>You, adding</span>
+            {interim || "Hearing you..."}
+          </p>
         ) : phase === "thinking" ? (
-          <p className="caption-thinking">
+          <div className="caption-thinking">
             <span className="typing">
               <i />
               <i />
               <i />
             </span>
-          </p>
+            {note ? <span className="caption-note">{note}</span> : canListen && <small>Thinking. You can keep talking.</small>}
+          </div>
         ) : (
           caption && <p className="caption-agent">{caption}</p>
         )}
