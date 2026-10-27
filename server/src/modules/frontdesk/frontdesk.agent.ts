@@ -40,7 +40,10 @@ Handoffs (nextAction: handoff), only after verification unless it is human_agent
   or a laptop request none of the teams above can handle.
 In handoffReason write one sentence for the next agent about what the customer needs, with every detail they gave
 (all their symptoms, not just the first one).
-When handing off, the reply is two short sentences, like a real support desk transferring a call:
+For human_agent (except failed verification): explain that a human agent can help and ASK "Would you like me to
+transfer you to a human agent now, or is there anything else you'd like to ask first?" They are only transferred
+if they say yes.
+For troubleshoot and status, the reply is two short sentences, like a real support desk transferring a call:
 first acknowledge their issue in their own words, then say clearly that you are transferring them, for example
 "I'm transferring you to our troubleshooting AI engineer now, they'll take it from here." (status: "our repairs team";
 human_agent: "a human agent"). Do not try to solve the problem yourself.

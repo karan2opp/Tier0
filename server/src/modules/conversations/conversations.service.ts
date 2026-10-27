@@ -39,6 +39,12 @@ const INTERRUPTED_NOTE =
 const WITH_HUMAN_REPLY =
   "You're in the queue for a human agent, and they'll have everything we've talked about. They'll be with you shortly.";
 
+/** What the human line says while no human agents are live. */
+const NO_HUMAN_AVAILABLE = (firstName: string | null) =>
+  `Hi${firstName ? ` ${firstName}` : ""}, thanks for holding. Sorry, no human agents are available right now. ` +
+  "We've saved everything from this call, so you won't have to repeat yourself, and an engineer will get back " +
+  "to you as soon as possible. Thank you for calling Tier0 support.";
+
 const AGENT_TITLES: Record<AgentName, string> = {
   front_desk: "front desk",
   troubleshoot: "troubleshooting engineer",
@@ -63,12 +69,22 @@ const INTRODUCTIONS: Partial<Record<AgentName, string>> = {
 /** The customer said yes to an offered transfer. */
 const ACCEPTS_TRANSFER = /^\s*(yes|yeah|yep|yup|sure|ok(ay)?|please|go ahead|do it|transfer|haan|ha)\b/i;
 
+/**
+ * The customer accepts a transfer to a human: "yes", "transfer me", "a person please", or "no, that's all"
+ * (the question was "transfer you now, or anything else first?").
+ */
+const ACCEPTS_HUMAN =
+  /^\s*(yes|yeah|yep|yup|sure|ok(ay)?|please|go ahead|do it|transfer|connect|haan|ha)\b|\b(human|person|real agent|transfer me|connect me|nothing( else)?|that'?s (all|it)|no,? thanks?|no,? that'?s)\b/i;
+
+const HUMAN_OFFER = "Would you like me to transfer you to a human agent now, or is there anything else you'd like to ask first?";
+
 const MENTIONS_TRANSFER = /\b(transferr?\w*|connect\w*|hand(ing)? you|pass(ing)? you|put(ting)? you through)\b/i;
 
 /** A specialist never sends the customer elsewhere unasked: it offers, and waits for a yes. */
 function offerTransfer(reply: string, to: AgentName): string {
   if (/\?\s*$/.test(reply.trim()) && MENTIONS_TRANSFER.test(reply)) return reply;
-  return `${reply.trim()} Would you like me to transfer you to ${TRANSFER_TO[to]}?`.trim();
+  const question = to === "human_agent" ? HUMAN_OFFER : `Would you like me to transfer you to ${TRANSFER_TO[to]}?`;
+  return `${reply.trim()} ${question}`.trim();
 }
 
 /** A transfer is always announced, like a real support desk, even if the model forgot to say it. */
@@ -104,7 +120,7 @@ interface Conversation {
   /** Customer messages whose answer was dropped because they kept talking; merged into the next message. */
   carry?: { current: CurrentMessage; outcome: Outcome };
   /** A transfer a specialist offered; it only happens if the customer says yes. */
-  offeredTransfer?: { from: AgentName; to: AgentName; reason: string };
+  offeredTransfer?: { from: AgentName; to: AgentName; reason: string; caseSummary?: unknown };
 }
 
 /** What one request collects as it moves through the agents. */
@@ -227,7 +243,10 @@ export class ConversationService {
 
       this.ensureConfigured();
       if (interrupted) this.note(conversation, conversation.active, INTERRUPTED_NOTE);
-      this.acceptOfferedTransfer(conversation, outcome, current);
+      if (this.acceptOfferedTransfer(conversation, outcome, current) === "human") {
+        outcome.status = "with_human";
+        return this.toReply(conversation, outcome);
+      }
       const controller = new AbortController();
       conversation.inflight = { kind: "message", controller };
       try {
@@ -304,9 +323,11 @@ export class ConversationService {
       }
 
       const target = turn.handoff && turn.handoff.to !== agent ? turn.handoff.to : undefined;
-      // Routing is the front desk's job, and a human escalation must not wait. Any other transfer a specialist
-      // wants (e.g. after solving the problem) is offered first, and only happens if the customer says yes.
-      const asksFirst = target !== undefined && agent !== "front_desk" && target !== "human_agent";
+      // Routing a new customer to a specialist is the front desk's job, so that is immediate. Every other transfer
+      // is offered first and only happens if the customer says yes - including a transfer to a human, where they
+      // can still ask anything else first. The one exception: failed verification goes to a human straight away.
+      const lockedOut = target === "human_agent" && conversation.identity.locked;
+      const asksFirst = target !== undefined && !lockedOut && (target === "human_agent" || agent !== "front_desk");
       const reply = !target ? turn.reply : asksFirst ? offerTransfer(turn.reply, target) : announceTransfer(turn.reply, target);
       outcome.messages.push({ agent, text: reply, index: this.say(conversation, agent, reply) });
       conversation.seen[agent] = conversation.transcript.length;
@@ -323,7 +344,7 @@ export class ConversationService {
       // Handing the customer to the agent that is already talking changes nothing.
       if (!handoff || handoff.to === agent) return;
       if (asksFirst) {
-        conversation.offeredTransfer = { from: agent, to: handoff.to, reason: handoff.reason };
+        conversation.offeredTransfer = { from: agent, to: handoff.to, reason: handoff.reason, caseSummary: handoff.caseSummary };
         return;
       }
 
@@ -333,8 +354,7 @@ export class ConversationService {
       logger.info({ sessionId: conversation.id, from: agent, to: handoff.to, reason: handoff.reason }, "Handoff");
 
       if (handoff.to === "human_agent") {
-        this.escalate(conversation, agent, handoff.reason, handoff.caseSummary);
-        outcome.status = "with_human";
+        this.escalate(conversation, outcome, agent, handoff.reason, handoff.caseSummary);
         return;
       }
 
@@ -355,6 +375,7 @@ export class ConversationService {
   ): Promise<AgentTurn> {
     const briefing = this.briefing(conversation, agent, current.indices[0]);
     const { identity } = conversation;
+    const started = Date.now();
     const message = current.text;
     let turn: AgentTurn;
     switch (agent) {
@@ -387,6 +408,7 @@ export class ConversationService {
     }
     // Notes are only used up by a run that finished; a cancelled run leaves them for the next attempt.
     delete conversation.notes[agent];
+    logger.info({ sessionId: conversation.id, agent, ms: Date.now() - started, tools: turn.toolsRun }, "Agent answered");
     return turn;
   }
 
@@ -394,18 +416,32 @@ export class ConversationService {
    * If the customer said yes to a transfer the agent offered, makes it now: the agent confirms in one line and the
    * next agent answers this same message. Anything else ("no", or a new question) stays with the current agent.
    */
-  private acceptOfferedTransfer(conversation: Conversation, outcome: Outcome, current: CurrentMessage) {
+  private acceptOfferedTransfer(
+    conversation: Conversation,
+    outcome: Outcome,
+    current: CurrentMessage,
+  ): "human" | "agent" | null {
     const offer = conversation.offeredTransfer;
     conversation.offeredTransfer = undefined;
-    if (!offer || offer.from !== conversation.active || !ACCEPTS_TRANSFER.test(current.text)) return;
+    if (!offer || offer.from !== conversation.active) return null;
+    const toHuman = offer.to === "human_agent";
+    if (!(toHuman ? ACCEPTS_HUMAN : ACCEPTS_TRANSFER).test(current.text)) return null;
 
-    const line = `Great, I'm transferring you to ${TRANSFER_TO[offer.to]} now.`;
+    const line = toHuman
+      ? "Of course. I'm transferring you to a human agent now, and they'll have everything we've discussed."
+      : `Great, I'm transferring you to ${TRANSFER_TO[offer.to]} now.`;
     outcome.messages.push({ agent: offer.from, text: line, index: this.say(conversation, offer.from, line) });
     const record: HandoffRecord = { from: offer.from, to: offer.to, reason: offer.reason, at: new Date().toISOString() };
     conversation.handoffs.push(record);
     outcome.handoffs.push(record);
     logger.info({ sessionId: conversation.id, from: offer.from, to: offer.to }, "Customer accepted a transfer");
+
+    if (toHuman) {
+      this.escalate(conversation, outcome, offer.from, offer.reason, offer.caseSummary);
+      return "human";
+    }
     this.takeOver(conversation, offer.from, offer.to, offer.reason);
+    return "agent";
   }
 
   /** Hands the call to another agent, with a note on why and who the customer is. */
@@ -442,7 +478,17 @@ export class ConversationService {
     (conversation.notes[agent] ??= []).push(text);
   }
 
-  private escalate(conversation: Conversation, from: AgentName, reason: string, caseSummary?: unknown) {
+  /**
+   * Puts the call through to the human line. No human agents are live yet, so the line answers that nobody is
+   * available, the case is kept with everything they need, and the call ends.
+   */
+  private escalate(
+    conversation: Conversation,
+    outcome: Outcome,
+    from: AgentName,
+    reason: string,
+    caseSummary?: unknown,
+  ) {
     conversation.active = "human_agent";
     conversation.escalation = {
       from,
@@ -452,6 +498,12 @@ export class ConversationService {
       ...(caseSummary !== undefined && { caseSummary }),
     };
     logger.info({ sessionId: conversation.id, from, reason }, "Escalated to a human agent");
+
+    const name = conversation.identity.firstName;
+    const line = NO_HUMAN_AVAILABLE(name);
+    outcome.messages.push({ agent: "human_agent", text: line, index: this.say(conversation, "human_agent", line) });
+    outcome.status = "with_human";
+    outcome.ended = true;
   }
 
   /** What the agent missed since it last spoke (before the current message), plus its notes. */

@@ -44,7 +44,8 @@ Handoffs (nextAction: handoff):
 - troubleshoot: a new problem with a laptop that is not already in for repair.
 - front_desk: questions about warranty cover or their laptops in general, or anything unrelated to repairs.
 - human_agent: complaints, cancellations, refunds or payments, a change after the laptop is out for delivery,
-  or they ask for a person. Say clearly that you are transferring them to a human agent.
+  or they ask for a person. Explain that a human agent can help, and ASK: "Would you like me to transfer you to a
+  human agent now, or is there anything else you'd like to ask first?"
 For troubleshoot and front_desk, ASK first, e.g. "Our troubleshooting AI engineer can help with that. Would you like
 me to transfer you?" They are only transferred if they say yes. Never claim you transferred them.
 
