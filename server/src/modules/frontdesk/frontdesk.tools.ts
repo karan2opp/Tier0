@@ -18,6 +18,13 @@ const daysBetween = (from: string, to: string) => Math.round((Date.parse(to) - D
 
 const noParams = z.object({});
 
+/** Words that show the customer asked about their warranty or laptops (checked by the server on their own words). */
+const LAPTOP_QUESTION =
+  /\b(warrant\w*|guarantee|cover(s|ed|age)?|expir\w*|still valid|protection plan|insurance|free (repair|of cost)|my laptops|which laptops?|laptop details|what model|purchase\w*|bought)\b/i;
+
+/** Whether anything the customer said in this call asks about their warranty or laptops. */
+export const askedAboutLaptops = (messages: string[]) => messages.some((m) => LAPTOP_QUESTION.test(m));
+
 export const verifyCustomerTool = createVerifyCustomerTool<FrontDeskContext>();
 
 export const laptopsAndWarrantiesTool = tool<typeof noParams, FrontDeskContext>({
@@ -27,9 +34,11 @@ export const laptopsAndWarrantiesTool = tool<typeof noParams, FrontDeskContext>(
     "and what the plan covers and does not cover.",
   parameters: noParams,
   // Only once the customer is verified (it always reads THAT customer's data), and once per message.
+  // Only once verified (it reads THAT customer's data), once per message, and only when the customer asked:
+  // the front desk never volunteers account details nobody asked for.
   isEnabled: ({ runContext }) => {
     const { session, turn } = runContext.context;
-    return Boolean(session.customerId) && turn.lookups < 1;
+    return Boolean(session.customerId) && turn.lookups < 1 && askedAboutLaptops(session.customerMessages);
   },
   execute: async (_input, runContext?: RunContext<FrontDeskContext>) => {
     const { session, turn } = runContext!.context;

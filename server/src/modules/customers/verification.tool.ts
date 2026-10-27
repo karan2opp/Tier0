@@ -86,7 +86,20 @@ export function createVerifyCustomerTool<TContext extends VerificationContext>()
       }
       session.attemptsThisTurn += 1;
 
-      const outcome = await verifyFromCustomerMessages(session.customerMessages);
+      let outcome;
+      try {
+        outcome = await verifyFromCustomerMessages(session.customerMessages);
+      } catch (err) {
+        // Our records being unreachable is not the customer's fault, so it never counts as a failed attempt.
+        logger.error({ err }, "Verification lookup failed");
+        return wrapUntrustedToolOutput("verify_customer", {
+          verified: false,
+          systemUnavailable: true,
+          note:
+            "Our customer records are unavailable right now. Their details may be correct: do not say they were wrong " +
+            "and do not ask for them again. Apologise, say our system is having trouble, and offer a human agent.",
+        });
+      }
 
       switch (outcome.status) {
         case "verified":
