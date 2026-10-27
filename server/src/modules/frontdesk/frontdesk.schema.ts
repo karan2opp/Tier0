@@ -7,10 +7,10 @@ export type FrontDeskHandoffTarget = (typeof handoffTargets)[number];
 export const frontDeskDecisionSchema = z.object({
   reply: z.string().describe("What to say to the customer now, in plain spoken sentences, no markdown"),
   nextAction: z
-    .enum(["ask_question", "answered", "handoff"])
+    .enum(["ask_question", "answered", "handoff", "done"])
     .describe(
-      "ask_question: need details from the customer. answered: their question is answered or they are done. " +
-        "handoff: a specialist should take over.",
+      "ask_question: need details from the customer. answered: their question is answered. " +
+        "handoff: a specialist should take over. done: they need nothing else; the reply is a short goodbye.",
     ),
   handoffTo: z.enum(handoffTargets).nullable().describe("Who should take over, only when nextAction is handoff"),
   handoffReason: z

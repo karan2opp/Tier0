@@ -8,7 +8,15 @@ import {
   type RunState,
   type RunToolApprovalItem,
 } from "@openai/agents";
-import { AppError, ConflictError, ForbiddenError, logger, NotFoundError, ServiceUnavailableError } from "../../common";
+import {
+  AppError,
+  ConflictError,
+  ForbiddenError,
+  logger,
+  NotFoundError,
+  ServiceUnavailableError,
+  SupersededError,
+} from "../../common";
 import {
   BLOCKED_INPUT_REPLIES,
   BLOCKED_OUTPUT_REPLY,
@@ -43,6 +51,8 @@ export interface StatusInput {
   identity: VerificationState;
   /** What happened before this agent took over (or since it last spoke), added before the message. */
   briefing?: AgentInputItem[];
+  /** Aborted when the customer adds to their message before this answer is ready. */
+  signal?: AbortSignal;
 }
 
 interface Session {
@@ -61,7 +71,7 @@ export class StatusService {
     this.agent = createStatusAgent();
   }
 
-  async handleMessage({ sessionId: id, message, identity, briefing = [] }: StatusInput): Promise<StatusReply> {
+  async handleMessage({ sessionId: id, message, identity, briefing = [], signal }: StatusInput): Promise<StatusReply> {
     this.ensureConfigured();
     // Repairs are account data: the front desk must have verified the customer first.
     if (!identity.customerId) throw new ForbiddenError("The customer must be verified before checking repairs");
@@ -98,7 +108,7 @@ export class StatusService {
     const context: StatusContext = { session: session.state };
 
     // Retrying is safe: a change can never be saved before the customer confirms it.
-    return this.execute(id, session, () => run(this.agent, input, { context, maxTurns: MAX_TURNS }), true);
+    return this.execute(id, session, () => run(this.agent, input, { context, maxTurns: MAX_TURNS, signal }), true, signal);
   }
 
   async handleApproval(sessionId: string, approve: boolean): Promise<StatusReply> {
@@ -125,6 +135,7 @@ export class StatusService {
     session: Session,
     runAgent: () => Promise<RunResult<StatusContext, any>>,
     retryBlockedOutput: boolean,
+    signal?: AbortSignal,
   ): Promise<StatusReply> {
     const base = { sessionId, agent: "status" as const };
 
@@ -157,7 +168,7 @@ export class StatusService {
         }
         logger.info({ sessionId, reasons: rejected.map((r) => r.reason) }, "Change request auto-cancelled by policy");
         for (const { item, reason } of rejected) result.state.reject(item, { message: reason });
-        result = await run(this.agent, result.state, { maxTurns: MAX_TURNS });
+        result = await run(this.agent, result.state, { maxTurns: MAX_TURNS, signal });
       }
 
       const toolsRun = result.newItems
@@ -185,6 +196,15 @@ export class StatusService {
       const { reply, ...details } = decision;
       return { ...base, status: "completed", reply, toolsRun, decision: details, handoff };
     } catch (err) {
+      if (signal?.aborted) {
+        // Dropped for a newer message. Slots offered in this run were never shown to the customer,
+        // so they must not count as "seen" (and choosable) later. Nothing can have been saved without approval.
+        const { state } = session;
+        for (const [slotId, slot] of Object.entries(state.offeredSlots)) {
+          if (slot.offeredInTurn === state.turn) delete state.offeredSlots[slotId];
+        }
+        throw new SupersededError();
+      }
       if (err instanceof InputGuardrailTripwireTriggered) {
         const check = err.result.output.outputInfo as InputCheck;
         const category = check.category === "none" ? "prompt_injection" : check.category;

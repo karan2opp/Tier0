@@ -8,4 +8,5 @@ export {
   ConflictError,
   TooManyRequestsError,
   ServiceUnavailableError,
+  SupersededError,
 } from "./httpErrors";

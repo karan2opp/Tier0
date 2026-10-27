@@ -48,3 +48,10 @@ export class ServiceUnavailableError extends AppError {
     super(message, 503, { code: "SERVICE_UNAVAILABLE", ...options });
   }
 }
+
+/** The customer added to their message while it was being answered, so this answer was dropped for a newer one. */
+export class SupersededError extends AppError {
+  constructor(message = "Replaced by a newer message") {
+    super(message, 409, { code: "SUPERSEDED" });
+  }
+}

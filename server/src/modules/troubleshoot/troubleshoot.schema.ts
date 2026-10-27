@@ -4,7 +4,15 @@ export const runToolSchema = z.record(z.string(), z.unknown()).default({});
 
 /* ---------- The agent's structured decision (enforced on every turn) ---------- */
 
-export const nextActions = ["ask_question", "offer_check", "try_fix", "resolved", "escalate_to_human"] as const;
+export const nextActions = [
+  "ask_question",
+  "offer_check",
+  "try_fix",
+  "resolved",
+  "escalate_to_human",
+  "other_topic",
+  "done",
+] as const;
 export type NextAction = (typeof nextActions)[number];
 
 export const fixSchema = z.object({
@@ -27,9 +35,14 @@ export const troubleshootDecisionSchema = z.object({
   nextAction: z.enum(nextActions).describe(
     "ask_question: need info from the customer. offer_check: offering a self-check or to run a check. " +
       "try_fix: gave fix steps and waiting to hear if it worked. resolved: customer confirmed it is fixed. " +
-      "escalate_to_human: needs a repair, data at risk, out of ideas, or the customer wants a person.",
+      "escalate_to_human: needs a repair, data at risk, out of ideas, or the customer wants a person. " +
+      "other_topic: they asked about something that is not a laptop problem (warranty, a repair, pickup, delivery). " +
+      "done: they have nothing else; the reply is a short goodbye.",
   ),
-  escalationReason: z.string().nullable().describe("Why a human is needed, only when nextAction is escalate_to_human"),
+  escalationReason: z
+    .string()
+    .nullable()
+    .describe("Why a human is needed (escalate_to_human), or what they asked about (other_topic); otherwise null"),
 });
 
 export type TroubleshootDecision = z.infer<typeof troubleshootDecisionSchema>;

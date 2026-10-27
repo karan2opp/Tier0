@@ -8,7 +8,7 @@ import {
   type RunState,
   type RunToolApprovalItem,
 } from "@openai/agents";
-import { AppError, ConflictError, logger, NotFoundError, ServiceUnavailableError } from "../../common";
+import { AppError, ConflictError, logger, NotFoundError, ServiceUnavailableError, SupersededError } from "../../common";
 import {
   BLOCKED_INPUT_REPLIES,
   BLOCKED_OUTPUT_REPLY,
@@ -42,6 +42,8 @@ export interface TroubleshootInput {
   message: string;
   /** What happened before this agent took over (or since it last spoke), added before the message. */
   briefing?: AgentInputItem[];
+  /** Aborted when the customer adds to their message before this answer is ready. */
+  signal?: AbortSignal;
 }
 
 interface Session {
@@ -74,10 +76,16 @@ export class TroubleshootService {
     return { tool: name, provider: this.provider.name, result: await this.provider.run(name, args) };
   }
 
-  async handleMessage({ sessionId: id, message, briefing = [] }: TroubleshootInput): Promise<TroubleshootReply> {
+  async handleMessage({ sessionId: id, message, briefing = [], signal }: TroubleshootInput): Promise<TroubleshootReply> {
     this.ensureConfigured();
     const session = this.getOrCreateSession(id);
 
+    // A solved case stays on the line: what the customer says next starts a fresh case (another problem),
+    // with the conversation so far still in the history.
+    if (session.caseState.status === "resolved") {
+      session.caseState = newCase();
+      session.handoff = undefined;
+    }
     if (isClosed(session.caseState)) {
       throw new ConflictError(`This case is already ${session.caseState.status}. Start a new conversation for a new problem.`, {
         details: { handoff: session.handoff },
@@ -95,8 +103,9 @@ export class TroubleshootService {
     const input: AgentInputItem[] = [...session.history, ...briefing, { role: "user", content: message }];
     const context: TroubleshootContext = { caseState: session.caseState };
     // Safe to retry: no check can run before the customer approves it, so a fresh run has no side effects.
-    return this.execute(id, session, () => run(this.agent, input, { context, maxTurns: MAX_TURNS }), {
+    return this.execute(id, session, () => run(this.agent, input, { context, maxTurns: MAX_TURNS, signal }), {
       retryBlockedOutput: true,
+      signal,
     });
   }
 
@@ -131,7 +140,7 @@ export class TroubleshootService {
     sessionId: string,
     session: Session,
     runAgent: () => Promise<RunResult<TroubleshootContext, any>>,
-    { retryBlockedOutput = false }: { retryBlockedOutput?: boolean } = {},
+    { retryBlockedOutput = false, signal }: { retryBlockedOutput?: boolean; signal?: AbortSignal } = {},
   ): Promise<TroubleshootReply> {
     const base = { sessionId, agent: "troubleshoot" as const };
     const caseSummary = () => ({
@@ -157,7 +166,7 @@ export class TroubleshootService {
         );
         session.caseState.checksBlockedThisTurn = true;
         for (const item of result.interruptions) result.state.reject(item, { message: veto });
-        result = await run(this.agent, result.state, { maxTurns: MAX_TURNS });
+        result = await run(this.agent, result.state, { maxTurns: MAX_TURNS, signal });
         this.collectChecksRun(session, result, toolsRun);
       }
 
@@ -190,6 +199,8 @@ export class TroubleshootService {
       const { reply, ...details } = decision;
       return { ...base, status: "completed", reply, toolsRun, decision: details, case: caseSummary(), handoff };
     } catch (err) {
+      // Dropped for a newer message. No check can have run (each needs the customer's approval first).
+      if (signal?.aborted) throw new SupersededError();
       if (err instanceof InputGuardrailTripwireTriggered) {
         const check = err.result.output.outputInfo as InputCheck;
         const category = check.category === "none" ? "prompt_injection" : check.category;

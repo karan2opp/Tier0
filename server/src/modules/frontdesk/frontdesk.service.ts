@@ -5,7 +5,7 @@ import {
   type Agent,
   type AgentInputItem,
 } from "@openai/agents";
-import { AppError, logger, ServiceUnavailableError } from "../../common";
+import { AppError, logger, ServiceUnavailableError, SupersededError } from "../../common";
 import {
   BLOCKED_INPUT_REPLIES,
   BLOCKED_OUTPUT_REPLY,
@@ -38,6 +38,8 @@ export interface FrontDeskInput {
   identity: VerificationState;
   /** What happened since the front desk last spoke (e.g. a specialist's conversation), added before the message. */
   briefing?: AgentInputItem[];
+  /** Aborted when the customer adds to their message before this answer is ready. */
+  signal?: AbortSignal;
 }
 
 export interface FrontDeskReply {
@@ -59,12 +61,12 @@ export class FrontDeskService {
     this.agent = createFrontDeskAgent();
   }
 
-  async handleMessage({ sessionId, message, identity, briefing = [] }: FrontDeskInput): Promise<FrontDeskReply> {
+  async handleMessage({ sessionId, message, identity, briefing = [], signal }: FrontDeskInput): Promise<FrontDeskReply> {
     const base = { agent: "front_desk" as const };
     const history = this.histories.get(sessionId) ?? [];
     const input: AgentInputItem[] = [...history, ...briefing, { role: "user", content: message }];
     const context: FrontDeskContext = { session: identity, turn: { lookups: 0 } };
-    const runOnce = () => run(this.agent, input, { context, maxTurns: MAX_TURNS });
+    const runOnce = () => run(this.agent, input, { context, maxTurns: MAX_TURNS, signal });
 
     try {
       let result;
@@ -97,6 +99,8 @@ export class FrontDeskService {
       const { reply, ...details } = decision;
       return { ...base, status: "completed", reply, toolsRun, decision: details, handoff };
     } catch (err) {
+      // Dropped for a newer message: nothing was saved, so the next run starts clean.
+      if (signal?.aborted) throw new SupersededError();
       if (err instanceof InputGuardrailTripwireTriggered) {
         const check = err.result.output.outputInfo as InputCheck;
         const category = check.category === "none" ? "prompt_injection" : check.category;

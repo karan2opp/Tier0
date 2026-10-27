@@ -128,7 +128,7 @@ export function applyDecision(
   }
 
   let final = decision;
-  const isFinal = decision.nextAction === "resolved" || decision.nextAction === "escalate_to_human";
+  const isFinal = ["resolved", "escalate_to_human", "other_topic", "done"].includes(decision.nextAction);
 
   if (state.hardwareIssues.length > 0 && decision.nextAction !== "resolved") {
     // Rule: worn or failing hardware always goes to a human for repair or replacement.
@@ -158,9 +158,18 @@ export function applyDecision(
     hardwareIssues: state.hardwareIssues,
   };
 
-  if (final.nextAction === "resolved") {
+  if (final.nextAction === "resolved" || final.nextAction === "done") {
+    // Solved: the engineer stays on the line and asks if there is anything else, instead of transferring.
     state.status = "resolved";
-    return { decision: final, handoff: { to: "front_desk", reason: "Problem resolved", summary } };
+    const reply = final.nextAction === "resolved" ? askAnythingElse(final.reply) : final.reply;
+    return { decision: { ...final, reply } };
+  }
+  if (final.nextAction === "other_topic") {
+    // Another team can help; the conversation offers the transfer and waits for the customer's yes.
+    return {
+      decision: final,
+      handoff: { to: "front_desk", reason: final.escalationReason ?? "The customer asked about something other than a laptop problem", summary },
+    };
   }
   if (final.nextAction === "escalate_to_human") {
     state.status = "escalated";
@@ -170,6 +179,13 @@ export function applyDecision(
     };
   }
   return { decision: final };
+}
+
+const ANYTHING_ELSE = "Is there anything else I can help you with?";
+
+/** A solved case always ends with an offer to help further, never a silent transfer. */
+function askAnythingElse(reply: string): string {
+  return /\?\s*$/.test(reply.trim()) ? reply : `${reply.trim()} ${ANYTHING_ELSE}`;
 }
 
 function mergeUnique(existing: string[], added: string[]) {

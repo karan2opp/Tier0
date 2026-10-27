@@ -9,8 +9,11 @@ export type HandoffTarget = (typeof handoffTargets)[number];
 export const statusDecisionSchema = z.object({
   reply: z.string().describe("What to say to the customer now, in plain spoken sentences, no markdown"),
   nextAction: z
-    .enum(["ask_question", "answered", "handoff"])
-    .describe("ask_question: need details or a choice from the customer. answered: done for now. handoff: another team should take over."),
+    .enum(["ask_question", "answered", "handoff", "done"])
+    .describe(
+      "ask_question: need details or a choice from the customer. answered: their question is answered. " +
+        "handoff: another team should take over (the customer is asked first). done: they need nothing else; the reply is a goodbye.",
+    ),
   handoffTo: z.enum(handoffTargets).nullable().describe("Who should take over, only when nextAction is handoff"),
   handoffReason: z.string().nullable().describe("Why, only when nextAction is handoff"),
 });

@@ -23,6 +23,8 @@ export interface TranscriptEntry {
   agent?: AgentName;
   text: string;
   at: string;
+  /** A customer message blocked by a guardrail: hidden from every agent and from the transcript. */
+  dropped?: boolean;
 }
 
 export interface HandoffRecord {
@@ -60,7 +62,8 @@ export interface AgentTurn {
   debug?: Record<string, unknown>;
 }
 
-export type ConversationStatus = "completed" | "approval_required" | "blocked" | "with_human";
+/** superseded: the customer added to this message before it was answered; the newer request answers both. */
+export type ConversationStatus = "completed" | "approval_required" | "blocked" | "with_human" | "superseded";
 
 export interface ConversationReply {
   sessionId: string;
@@ -80,6 +83,8 @@ export interface ConversationReply {
   handoffs: HandoffRecord[];
   decisions: { agent: AgentName; decision: unknown }[];
   escalation?: Escalation;
+  /** The customer said they need nothing else and the agent said goodbye. */
+  ended?: boolean;
   /** Development only: why a guardrail blocked something. */
   debug?: Record<string, unknown>[];
 }
