@@ -12,3 +12,12 @@ export const chatRateLimit = rateLimit({
   legacyHeaders: false,
   handler: (_req, _res, next) => next(new TooManyRequestsError("Too many messages. Please wait a minute and try again.")),
 });
+
+/** Per-IP limit on voice audio (speech and transcription), which costs money per request. */
+export const voiceRateLimit = rateLimit({
+  windowMs: 60 * 1000,
+  limit: Number(process.env.VOICE_RATE_LIMIT_PER_MINUTE ?? 40),
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  handler: (_req, _res, next) => next(new TooManyRequestsError("Too many voice requests. Please wait a minute and try again.")),
+});

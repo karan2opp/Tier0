@@ -2,4 +2,4 @@ export { asyncHandler } from "./asyncHandler";
 export { validate } from "./validate";
 export { errorHandler, notFoundHandler } from "./errorHandler";
 export { requestLogger } from "./requestLogger";
-export { chatRateLimit } from "./rateLimit";
+export { chatRateLimit, voiceRateLimit } from "./rateLimit";

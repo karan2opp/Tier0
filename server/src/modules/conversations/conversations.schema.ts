@@ -4,10 +4,14 @@ export const conversationParamsSchema = z.object({ sessionId: z.uuid() });
 
 export const sendMessageSchema = z.object({
   message: z.string().trim().min(1, "Message is required").max(2000, "Message is too long"),
+  /** The customer talked over the agent's last reply, so they may not have heard all of it. */
+  interrupted: z.boolean().optional(),
 });
 export type SendMessageInput = z.infer<typeof sendMessageSchema>;
 
 export const approvalSchema = z.object({ approve: z.boolean() });
+
+export const speechParamsSchema = z.object({ sessionId: z.uuid(), index: z.coerce.number().int().min(0).max(10_000) });
 
 export const agentNames = ["front_desk", "troubleshoot", "status", "human_agent"] as const;
 export type AgentName = (typeof agentNames)[number];
@@ -63,8 +67,11 @@ export interface ConversationReply {
   status: ConversationStatus;
   /** Who the customer is talking to now. */
   activeAgent: AgentName;
-  /** Everything said in this request, in order; a handoff gives two (the transfer and the specialist's reply). */
-  messages: { agent: AgentName; text: string }[];
+  /**
+   * Everything said in this request, in order; a handoff gives two (the transfer and the specialist's reply).
+   * `index` is the line's place in the transcript, used to fetch its audio; blocked replies have none.
+   */
+  messages: { agent: AgentName; text: string; index?: number }[];
   verified: boolean;
   customer: CustomerSummary | null;
   toolsRun: { agent: AgentName; tool: string }[];
