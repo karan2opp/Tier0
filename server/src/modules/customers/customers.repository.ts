@@ -17,9 +17,11 @@ export async function findCustomerByPhone(phone: string) {
   });
 }
 
-export async function findSerialNumbers(customerId: string): Promise<string[]> {
-  const rows = await db.select({ serial: devices.serialNumber }).from(devices).where(eq(devices.customerId, customerId));
-  return rows.map((row) => row.serial);
+export async function findDevicesForVerification(customerId: string) {
+  return db
+    .select({ id: devices.id, brand: devices.brand, model: devices.model, serialNumber: devices.serialNumber })
+    .from(devices)
+    .where(eq(devices.customerId, customerId));
 }
 
 export async function recordVerificationAttempt(phone: string, succeeded: boolean) {

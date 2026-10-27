@@ -2,16 +2,23 @@ import { logger } from "../../common";
 import {
   countRecentFailedAttempts,
   findCustomerByPhone,
-  findSerialNumbers,
+  findDevicesForVerification,
   phoneKey,
   recordVerificationAttempt,
 } from "./customers.repository";
+
+/** The laptop the customer verified with: the one this call is about. */
+export interface VerifiedLaptop {
+  deviceId: string;
+  name: string;
+  serialEnding: string;
+}
 
 /** Cross-conversation limit: failed attempts allowed per phone number per window. */
 export const PHONE_RATE_LIMIT = { maxFailures: 5, windowMs: 60 * 60 * 1000 } as const;
 
 export type VerificationOutcome =
-  | { status: "verified"; customerId: string; firstName: string }
+  | { status: "verified"; customerId: string; firstName: string; laptop: VerifiedLaptop }
   /** No phone number found in what the customer typed. */
   | { status: "need_phone" }
   /** A phone number was found, but no serial number to check it against. */
@@ -78,13 +85,21 @@ export async function verifyFromCustomerMessages(messages: string[]): Promise<Ve
   }
 
   const customer = await findCustomerByPhone(phone);
-  const customerSerials = customer ? (await findSerialNumbers(customer.id)).map(normalizeSerial) : [];
-  const matches = customer && serials.some((serial) => customerSerials.includes(serial));
+  const customerDevices = customer ? await findDevicesForVerification(customer.id) : [];
+  // Serials are most recent first, so the laptop they named last is the one the call is about.
+  const device = serials
+    .map((serial) => customerDevices.find((d) => normalizeSerial(d.serialNumber) === serial))
+    .find(Boolean);
 
-  await recordVerificationAttempt(phone, Boolean(matches));
-  if (!customer || !matches) return { status: "no_match" };
+  await recordVerificationAttempt(phone, Boolean(device));
+  if (!customer || !device) return { status: "no_match" };
 
-  return { status: "verified", customerId: customer.id, firstName: customer.fullName.split(" ")[0] };
+  return {
+    status: "verified",
+    customerId: customer.id,
+    firstName: customer.fullName.split(" ")[0],
+    laptop: { deviceId: device.id, name: `${device.brand} ${device.model}`, serialEnding: device.serialNumber.slice(-4) },
+  };
 }
 
 export { phoneKey };

@@ -2,12 +2,14 @@ import { tool, type RunContext } from "@openai/agents";
 import { z } from "zod";
 import { wrapUntrustedToolOutput } from "../../common/guardrails";
 import { findDevicesWithWarranties } from "../customers/customers.repository";
-import { createVerifyCustomerTool } from "../customers/verification.tool";
-import type { InfoSession } from "./info.schema";
-import { WARRANTY_PLANS } from "./info.warranty";
+import { createVerifyCustomerTool, type VerificationState } from "../customers/verification.tool";
+import { WARRANTY_PLANS } from "./frontdesk.warranty";
 
-export interface InfoContext {
-  session: InfoSession;
+export interface FrontDeskContext {
+  /** The conversation's identity, shared with every agent the customer is handed to. */
+  session: VerificationState;
+  /** Laptop and warranty lookups since the customer's last message (max one: it returns everything). */
+  turn: { lookups: number };
 }
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -16,9 +18,9 @@ const daysBetween = (from: string, to: string) => Math.round((Date.parse(to) - D
 
 const noParams = z.object({});
 
-export const verifyCustomerTool = createVerifyCustomerTool<InfoContext>();
+export const verifyCustomerTool = createVerifyCustomerTool<FrontDeskContext>();
 
-export const laptopsAndWarrantiesTool = tool<typeof noParams, InfoContext>({
+export const laptopsAndWarrantiesTool = tool<typeof noParams, FrontDeskContext>({
   name: "get_my_laptops_and_warranties",
   description:
     "The verified customer's laptops with their warranty: plan, start and end dates, whether it is active, days left, " +
@@ -26,21 +28,21 @@ export const laptopsAndWarrantiesTool = tool<typeof noParams, InfoContext>({
   parameters: noParams,
   // Only once the customer is verified (it always reads THAT customer's data), and once per message.
   isEnabled: ({ runContext }) => {
-    const { session } = runContext.context;
-    return Boolean(session.customerId) && session.lookupsThisTurn < 1;
+    const { session, turn } = runContext.context;
+    return Boolean(session.customerId) && turn.lookups < 1;
   },
-  execute: async (_input, runContext?: RunContext<InfoContext>) => {
-    const session = runContext!.context.session;
-    session.lookupsThisTurn += 1;
-    const customerId = session.customerId!;
+  execute: async (_input, runContext?: RunContext<FrontDeskContext>) => {
+    const { session, turn } = runContext!.context;
+    turn.lookups += 1;
     const now = today();
-    const laptops = (await findDevicesWithWarranties(customerId)).map((device) => {
+    const laptops = (await findDevicesWithWarranties(session.customerId!)).map((device) => {
       const latest = [...device.warranties].sort((a, b) => b.endsOn.localeCompare(a.endsOn))[0];
       const plan = latest ? WARRANTY_PLANS[latest.plan] : null;
       const daysLeft = latest ? daysBetween(now, latest.endsOn) : null;
       return {
         laptop: `${device.brand} ${device.model}`,
         serialEnding: device.serialNumber.slice(-4),
+        onThisCall: device.id === session.laptop?.deviceId,
         purchaseDate: device.purchaseDate,
         warranty: latest && plan
           ? {

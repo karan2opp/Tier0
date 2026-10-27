@@ -2,7 +2,7 @@ import { tool, type RunContext } from "@openai/agents";
 import { z } from "zod";
 import { logger } from "../../common";
 import { wrapUntrustedToolOutput } from "../../common/guardrails";
-import { verifyFromCustomerMessages } from "./customers.service";
+import { verifyFromCustomerMessages, type VerifiedLaptop } from "./customers.service";
 
 /** Failed attempts allowed in one conversation before it locks and goes to a human. */
 export const MAX_VERIFICATION_ATTEMPTS = 3;
@@ -11,6 +11,8 @@ export const MAX_VERIFICATION_ATTEMPTS = 3;
 export interface VerificationState {
   customerId: string | null;
   firstName: string | null;
+  /** The laptop they verified with (the one this call is about). */
+  laptop: VerifiedLaptop | null;
   failedAttempts: number;
   locked: boolean;
   /** Verification attempts since the customer's last message (max one per message). */
@@ -24,7 +26,15 @@ export interface VerificationContext {
 }
 
 export function newVerificationState(): VerificationState {
-  return { customerId: null, firstName: null, failedAttempts: 0, locked: false, attemptsThisTurn: 0, customerMessages: [] };
+  return {
+    customerId: null,
+    firstName: null,
+    laptop: null,
+    failedAttempts: 0,
+    locked: false,
+    attemptsThisTurn: 0,
+    customerMessages: [],
+  };
 }
 
 /** Call for every new customer message: allows one more attempt and makes its details usable for verification. */
@@ -41,7 +51,10 @@ export function forgetLastCustomerMessage(state: VerificationState) {
 /** Short status line for an agent's instructions. */
 export function describeVerification(state: VerificationState): string {
   if (state.locked) return "Verification status: LOCKED after too many failed attempts. Hand off to a human agent.";
-  if (state.customerId) return `Verification status: customer verified (first name: ${state.firstName}).`;
+  if (state.customerId) {
+    const laptop = state.laptop ? ` Laptop on this call: ${state.laptop.name} (S/N ending ${state.laptop.serialEnding}).` : "";
+    return `Verification status: customer verified (first name: ${state.firstName}).${laptop}`;
+  }
   return `Verification status: NOT verified yet (${state.failedAttempts} failed attempts so far).`;
 }
 
@@ -79,8 +92,13 @@ export function createVerifyCustomerTool<TContext extends VerificationContext>()
         case "verified":
           session.customerId = outcome.customerId;
           session.firstName = outcome.firstName;
+          session.laptop = outcome.laptop;
           logger.info({ failedAttemptsBefore: session.failedAttempts }, "Customer verified");
-          return wrapUntrustedToolOutput("verify_customer", { verified: true, firstName: outcome.firstName });
+          return wrapUntrustedToolOutput("verify_customer", {
+            verified: true,
+            firstName: outcome.firstName,
+            laptopOnThisCall: `${outcome.laptop.name} (S/N ending ${outcome.laptop.serialEnding})`,
+          });
 
         // Missing details are not a failed attempt: the customer simply has not shared them yet.
         case "need_phone":
