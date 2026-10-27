@@ -5,7 +5,7 @@ import {
   type Agent,
   type AgentInputItem,
 } from "@openai/agents";
-import { AppError, logger, ServiceUnavailableError, SupersededError } from "../../common";
+import { AppError, compactHistory, logger, ServiceUnavailableError, SupersededError } from "../../common";
 import {
   BLOCKED_INPUT_REPLIES,
   BLOCKED_OUTPUT_REPLY,
@@ -64,7 +64,7 @@ export class FrontDeskService {
   async handleMessage({ sessionId, message, identity, briefing = [], signal }: FrontDeskInput): Promise<FrontDeskReply> {
     const base = { agent: "front_desk" as const };
     const history = this.histories.get(sessionId) ?? [];
-    const input: AgentInputItem[] = [...history, ...briefing, { role: "user", content: message }];
+    const input: AgentInputItem[] = [...compactHistory(history), ...briefing, { role: "user", content: message }];
     const context: FrontDeskContext = { session: identity, turn: { lookups: 0 } };
     const runOnce = () => run(this.agent, input, { context, maxTurns: MAX_TURNS, signal });
 

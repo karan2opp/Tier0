@@ -10,6 +10,7 @@ import {
 } from "@openai/agents";
 import {
   AppError,
+  compactHistory,
   ConflictError,
   ForbiddenError,
   logger,
@@ -104,7 +105,7 @@ export class StatusService {
     session.state.lookupsThisTurn = 0;
     session.state.slotLookupsThisTurn = 0;
     session.state.changesThisTurn = 0;
-    const input: AgentInputItem[] = [...session.history, ...briefing, { role: "user", content: message }];
+    const input: AgentInputItem[] = [...compactHistory(session.history), ...briefing, { role: "user", content: message }];
     const context: StatusContext = { session: session.state };
 
     // Retrying is safe: a change can never be saved before the customer confirms it.
