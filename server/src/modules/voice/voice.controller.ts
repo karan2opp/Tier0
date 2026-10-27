@@ -1,44 +1,24 @@
-import { Readable } from "node:stream";
-import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import type { Request, Response } from "express";
-import { ApiResponse, logger } from "../../common";
+import { ApiResponse } from "../../common";
 import type { AgentName } from "../conversations/conversations.schema";
 import { FILLERS, type FillerKind } from "./voice.fillers";
 import { voiceService, type VoiceService } from "./voice.service";
 
 /**
- * Streams generated speech to the browser as it is produced (playback starts sooner), or sends cached audio.
- * A complete clip is handed to `remember` so it is never paid for twice.
+ * Sends an agent line as MP3: from the cache, or generated (complete, with a stall retry) and cached, so the same
+ * line is never paid for twice.
  */
 export async function sendSpeech(
   res: Response,
   voice: VoiceService,
   { text, agent, cached, remember }: { text: string; agent: AgentName; cached?: Buffer; remember: (audio: Buffer) => void },
 ) {
-  const audioHeaders = () => {
-    res.setHeader("Content-Type", "audio/mpeg");
-    res.setHeader("Cache-Control", "private, max-age=3600");
-  };
-  if (cached) {
-    audioHeaders();
-    res.end(cached);
-    return;
-  }
-
-  // Headers only after generation has started, so a failure still returns a normal JSON error.
-  const upstream = await voice.synthesize(text, agent);
-  audioHeaders();
-  const chunks: Buffer[] = [];
-  const audio = Readable.fromWeb(upstream.body as WebReadableStream<Uint8Array>);
-  audio.on("data", (chunk: Buffer) => chunks.push(chunk));
-  audio.on("end", () => remember(Buffer.concat(chunks)));
-  audio.on("error", (err) => {
-    logger.error({ err }, "Speech stream failed");
-    res.destroy(err);
-  });
-  // A customer who interrupts closes the request; stop downloading audio nobody will hear.
-  res.on("close", () => audio.destroy());
-  audio.pipe(res);
+  // Generated before any header is sent, so a failure still returns a normal JSON error.
+  const audio = cached ?? (await voice.synthesize(text, agent));
+  if (!cached) remember(audio);
+  res.setHeader("Content-Type", "audio/mpeg");
+  res.setHeader("Cache-Control", "private, max-age=3600");
+  res.end(audio);
 }
 
 export class VoiceController {

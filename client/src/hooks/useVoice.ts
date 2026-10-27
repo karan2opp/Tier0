@@ -40,6 +40,9 @@ interface QueueItem {
 const GAP_MS = 300;
 /** How long the "connecting you to..." moment lasts between two agents. */
 const TRANSFER_PAUSE_MS = 900;
+/** If an agent line has not started playing by now, the browser voice reads it instead (the server retries a
+ * stalled line once, within about 24 seconds). */
+const AUDIO_START_TIMEOUT_MS = 26_000;
 const MIC_BLOCKED = "Microphone access is blocked. Allow it in your browser, or type instead.";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -109,18 +112,28 @@ export function useVoice({
   const playAudio = (el: HTMLAudioElement) =>
     new Promise<boolean>((resolve) => {
       let settled = false;
-      const done = (ok: boolean) => {
-        if (settled) return;
-        settled = true;
-        el.onended = el.onerror = null;
-        resolve(ok);
-      };
-      el.onended = () => done(true);
-      el.onerror = () => done(false);
-      stopCurrent.current = () => {
+      const stop = () => {
         el.pause();
         el.removeAttribute("src");
         el.load(); // cancels the download, so the server stops generating
+      };
+      // The voice service can be slow; rather than leave the call silent, give up and let the caller fall back.
+      const stalled = setTimeout(() => {
+        stop();
+        done(false);
+      }, AUDIO_START_TIMEOUT_MS);
+      const done = (ok: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(stalled);
+        el.onended = el.onerror = el.onplaying = null;
+        resolve(ok);
+      };
+      el.onplaying = () => clearTimeout(stalled);
+      el.onended = () => done(true);
+      el.onerror = () => done(false);
+      stopCurrent.current = () => {
+        stop();
         done(false);
       };
       el.play().catch(() => done(false));
@@ -154,7 +167,8 @@ export function useVoice({
           item.onDone(false);
           continue;
         }
-        setSpeaking(item.kind !== "filler");
+        // A filler is the agent speaking too, so nobody is told "your turn" while a reply waits behind it.
+        setSpeaking(true);
         current.current = item;
         currentCut.current = false;
         item.onStart();

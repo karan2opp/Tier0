@@ -61,7 +61,7 @@ export function AgentStage({
       ? interim || "Listening... let go to send"
       : phase === "transferring"
         ? `Connecting you to our ${meta.name.toLowerCase()}...`
-        : phase === "thinking"
+        : phase === "thinking" || phase === "speaking"
           ? note || caption
           : caption;
 
