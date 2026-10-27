@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { ApiResponse, asyncHandler } from "../common";
 import { isDatabaseUp } from "../db/client";
-import statusRoutes from "./status/status.routes";
+import conversationRoutes from "./conversations/conversations.routes";
 import troubleshootRoutes from "./troubleshoot/troubleshoot.routes";
 
 const router = Router();
@@ -14,7 +14,7 @@ router.get(
   }),
 );
 
+router.use("/conversations", conversationRoutes);
 router.use("/troubleshoot", troubleshootRoutes);
-router.use("/status", statusRoutes);
 
 export default router;

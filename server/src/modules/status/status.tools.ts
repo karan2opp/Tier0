@@ -2,7 +2,6 @@ import { tool, type RunContext } from "@openai/agents";
 import { z } from "zod";
 import { logger } from "../../common";
 import { wrapUntrustedToolOutput } from "../../common/guardrails";
-import { createVerifyCustomerTool } from "../customers/verification.tool";
 import {
   DELIVERY_SCHEDULABLE,
   describeWindow,
@@ -20,7 +19,8 @@ export interface StatusContext {
   session: StatusSession;
 }
 
-const verified = ({ runContext }: { runContext: RunContext<StatusContext> }) => Boolean(runContext.context.session.customerId);
+const verified = ({ runContext }: { runContext: RunContext<StatusContext> }) =>
+  Boolean(runContext.context.session.identity.customerId);
 
 /** Why a pickup or delivery cannot be changed right now, or null when it can. */
 function blockedReason(kind: "pickup" | "delivery", status: TicketStatus): string | null {
@@ -62,8 +62,6 @@ export function whySlotNotChoosable(session: StatusSession, slotId: string): str
 
 const noParams = z.object({});
 
-export const verifyCustomerTool = createVerifyCustomerTool<StatusContext>();
-
 export const myRepairsTool = tool<typeof noParams, StatusContext>({
   name: "get_my_repairs",
   description:
@@ -76,11 +74,12 @@ export const myRepairsTool = tool<typeof noParams, StatusContext>({
     const session = runContext!.context.session;
     session.lookupsThisTurn += 1;
 
-    const tickets = (await findTicketsForCustomer(session.customerId!)).map((ticket) => {
+    const tickets = (await findTicketsForCustomer(session.identity.customerId!)).map((ticket) => {
       const latest = ticket.events.at(-1);
       return {
         ticketNumber: ticket.ticketNumber,
         laptop: `${ticket.device.brand} ${ticket.device.model}`,
+        onThisCall: ticket.device.id === session.identity.laptop?.deviceId,
         serialEnding: ticket.device.serialNumber.slice(-4),
         issue: ticket.issue,
         diagnosis: ticket.diagnosis,
@@ -126,7 +125,7 @@ export const availableSlotsTool = tool<typeof slotParams, StatusContext>({
   execute: async ({ ticketNumber, kind }, runContext?: RunContext<StatusContext>) => {
     const session = runContext!.context.session;
     session.slotLookupsThisTurn += 1;
-    const ticket = await findTicketForCustomer(session.customerId!, ticketNumber);
+    const ticket = await findTicketForCustomer(session.identity.customerId!, ticketNumber);
     if (!ticket) {
       return wrapUntrustedToolOutput("get_available_slots", { available: false, reason: "No such ticket for this customer." });
     }
@@ -178,7 +177,7 @@ export const rescheduleVisitTool = tool<typeof rescheduleParams, StatusContext>(
     const slot = session.offeredSlots[slotId.trim().toUpperCase()];
 
     // Re-check everything at the moment of the change: ownership, status, and that the slot is still ahead.
-    const ticket = await findTicketForCustomer(session.customerId!, slot.ticketNumber);
+    const ticket = await findTicketForCustomer(session.identity.customerId!, slot.ticketNumber);
     if (!ticket || ticket.id !== slot.ticketId) {
       return wrapUntrustedToolOutput("reschedule_visit", { done: false, reason: "No such ticket for this customer." });
     }

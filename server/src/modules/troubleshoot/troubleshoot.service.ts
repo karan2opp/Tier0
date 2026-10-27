@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import {
   InputGuardrailTripwireTriggered,
   OutputGuardrailTripwireTriggered,
@@ -26,7 +25,6 @@ import type {
   CaseState,
   Handoff,
   PendingApproval,
-  SendMessageInput,
   TroubleshootDecision,
   TroubleshootReply,
   troubleshootDecisionSchema,
@@ -37,6 +35,14 @@ const MAX_TURNS = 10;
 
 const DECLINED_MESSAGE =
   "The customer declined this check. Do not run it again. Continue with steps they can do themselves.";
+
+export interface TroubleshootInput {
+  sessionId: string;
+  /** The customer's message, already redacted. */
+  message: string;
+  /** What happened before this agent took over (or since it last spoke), added before the message. */
+  briefing?: AgentInputItem[];
+}
 
 interface Session {
   history: AgentInputItem[];
@@ -68,9 +74,8 @@ export class TroubleshootService {
     return { tool: name, provider: this.provider.name, result: await this.provider.run(name, args) };
   }
 
-  async handleMessage({ sessionId, message }: SendMessageInput): Promise<TroubleshootReply> {
+  async handleMessage({ sessionId: id, message, briefing = [] }: TroubleshootInput): Promise<TroubleshootReply> {
     this.ensureConfigured();
-    const id = sessionId ?? randomUUID();
     const session = this.getOrCreateSession(id);
 
     if (isClosed(session.caseState)) {
@@ -87,7 +92,7 @@ export class TroubleshootService {
     // A new customer message starts a new "turn" for the per-reply check limit.
     session.caseState.checksThisTurn = 0;
     session.caseState.checksBlockedThisTurn = false;
-    const input: AgentInputItem[] = [...session.history, { role: "user", content: message }];
+    const input: AgentInputItem[] = [...session.history, ...briefing, { role: "user", content: message }];
     const context: TroubleshootContext = { caseState: session.caseState };
     // Safe to retry: no check can run before the customer approves it, so a fresh run has no side effects.
     return this.execute(id, session, () => run(this.agent, input, { context, maxTurns: MAX_TURNS }), {

@@ -1,16 +1,5 @@
 import { z } from "zod";
 
-export const sendMessageSchema = z.object({
-  sessionId: z.uuid().optional(),
-  message: z.string().trim().min(1, "Message is required").max(2000, "Message is too long"),
-});
-
-export type SendMessageInput = z.infer<typeof sendMessageSchema>;
-
-export const sessionParamsSchema = z.object({ sessionId: z.uuid() });
-
-export const approvalSchema = z.object({ approve: z.boolean() });
-
 export const runToolSchema = z.record(z.string(), z.unknown()).default({});
 
 /* ---------- The agent's structured decision (enforced on every turn) ---------- */

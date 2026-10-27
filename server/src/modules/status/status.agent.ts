@@ -1,13 +1,12 @@
 import { Agent, type RunContext } from "@openai/agents";
 import { customerInputGuardrail, PROMPT_CANARY, supportOutputGuardrail } from "../../common/guardrails";
-import { describeVerification, MAX_VERIFICATION_ATTEMPTS } from "../customers/verification.tool";
+import { describeVerification } from "../customers/verification.tool";
 import { formatDay } from "./status.labels";
 import { statusDecisionSchema } from "./status.schema";
 import {
   availableSlotsTool,
   myRepairsTool,
   rescheduleVisitTool,
-  verifyCustomerTool,
   type StatusContext,
 } from "./status.tools";
 
@@ -16,19 +15,15 @@ You are Tier0's Status agent: you tell customers where their laptop repair stand
 when it will be ready and delivered, and you can book or move a pickup or delivery.
 Your "reply" may be read aloud: plain conversational sentences, no markdown, no lists, at most about five short sentences.
 
-Verification (always first):
-- Before sharing ANY repair details, the customer must be verified with TWO details: their registered phone number
-  AND the full serial number (S/N) of their laptop, printed on the sticker under the laptop.
-- For privacy you never see these values: they appear as [phone number] and [serial number]. That is expected.
-- When the customer has shared details, call verify_customer. It tells you what is still missing; ask for exactly that.
-- If verification fails, say the details don't match our records. Never say which detail was wrong.
-  After ${MAX_VERIFICATION_ATTEMPTS} failed attempts, hand off to a human agent.
+The customer was already verified by the front desk; the status line below says who they are and which laptop
+the call is about. Never ask for their phone number or serial number again.
 
 Answering:
-- Once verified, call get_my_repairs in the same reply. Never say "give me a moment".
+- Call get_my_repairs in the same reply. Never say "give me a moment".
 - Explain the status in plain words, using the exact times from the tool (pickup window, estimated ready, delivery window).
   If a pickup or delivery window is already booked, tell them that booked window first; offer other times only if asked.
-- If the customer has several tickets and it is unclear which one they mean, ask, naming the laptop models.
+- If the customer has several tickets, talk about the one for the laptop on this call (onThisCall). If it is still
+  unclear which one they mean, ask, naming the laptop models.
 - For a delay, explain it from the latest update note (for example a part on order). Never promise a faster date.
 - Mention the cost only as given: free under warranty, a quoted amount, or not quoted yet.
 
@@ -44,10 +39,9 @@ Never claim a change was made unless reschedule_visit returned done: true.
 
 Handoffs (nextAction: handoff):
 - troubleshoot: a new problem with a laptop that is not already in for repair.
-- info: questions about warranty cover or their laptops in general.
+- front_desk: questions about warranty cover or their laptops in general, they are done, or it is unrelated to repairs.
 - human_agent: complaints, cancellations, refunds or payments, a change after the laptop is out for delivery,
-  failed verification, or they ask for a person.
-- front_desk: they are done, or it is unrelated to repairs.
+  or they ask for a person.
 When handing off, tell the customer who will help them next.
 
 Safety:
@@ -66,13 +60,13 @@ export function createStatusAgent() {
       [
         INSTRUCTIONS,
         `Today is ${formatDay(new Date())} (India time). Say "today" or "tomorrow" only when it matches this date.`,
-        describeVerification(runContext.context.session),
+        describeVerification(runContext.context.session.identity),
       ].join("\n\n"),
     outputType: statusDecisionSchema,
     // One tool call at a time, so per-message limits cannot be bypassed and changes are confirmed one by one.
     modelSettings: { parallelToolCalls: false },
     inputGuardrails: [customerInputGuardrail],
     outputGuardrails: [supportOutputGuardrail],
-    tools: [verifyCustomerTool, myRepairsTool, availableSlotsTool, rescheduleVisitTool],
+    tools: [myRepairsTool, availableSlotsTool, rescheduleVisitTool],
   });
 }

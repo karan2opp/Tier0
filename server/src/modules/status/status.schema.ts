@@ -2,16 +2,7 @@ import { z } from "zod";
 import type { VerificationState } from "../customers/verification.tool";
 import type { VisitKind } from "./status.repository";
 
-export const sendMessageSchema = z.object({
-  sessionId: z.uuid().optional(),
-  message: z.string().trim().min(1, "Message is required").max(2000, "Message is too long"),
-});
-export type SendMessageInput = z.infer<typeof sendMessageSchema>;
-
-export const sessionParamsSchema = z.object({ sessionId: z.uuid() });
-export const approvalSchema = z.object({ approve: z.boolean() });
-
-export const handoffTargets = ["troubleshoot", "info", "human_agent", "front_desk"] as const;
+export const handoffTargets = ["troubleshoot", "front_desk", "human_agent"] as const;
 export type HandoffTarget = (typeof handoffTargets)[number];
 
 /** The agent's structured decision, enforced on every turn. */
@@ -37,7 +28,9 @@ export interface OfferedSlot {
   offeredInTurn: number;
 }
 
-export interface StatusSession extends VerificationState {
+export interface StatusSession {
+  /** The conversation's verified identity, shared with the front desk. */
+  identity: VerificationState;
   /** Increases with every customer message. */
   turn: number;
   /** Whether the customer's latest message asks to change a booking (detected by the server, not the model). */
@@ -66,7 +59,6 @@ export interface StatusReply {
   agent: "status";
   status: ReplyStatus;
   reply: string;
-  verified: boolean;
   toolsRun: string[];
   approvals?: PendingChange[];
   decision?: Omit<StatusDecision, "reply">;
