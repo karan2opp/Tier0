@@ -1767,3 +1767,23 @@ button.chip:hover {
   color: var(--text);
   animation: fadeUp 0.3s ease;
 }
+
+kbd {
+  display: inline-block;
+  padding: 1px 7px;
+  margin: 0 2px;
+  border-radius: 6px;
+  border: 1px solid var(--line-2);
+  border-bottom-width: 2px;
+  background: var(--panel-2);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 11.5px;
+  color: var(--text);
+}
+
+/* Hold-to-talk: no text selection or callout while the button is held on touch screens. */
+.mic-btn {
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}

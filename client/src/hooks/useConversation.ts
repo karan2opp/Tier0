@@ -3,6 +3,7 @@ import {
   api,
   ApiError,
   isCheckApproval,
+  type AgentMessage,
   type AgentName,
   type ApprovalItem,
   type ConversationReply,
@@ -16,9 +17,22 @@ import { toolLabel } from "../agents";
 
 export type Entry =
   | { id: number; kind: "customer"; text: string; private: boolean }
-  | { id: number; kind: "agent"; agent: AgentName; text: string; blocked: boolean; index?: number; interrupted?: boolean }
+  | {
+      id: number;
+      kind: "agent";
+      agent: AgentName;
+      text: string;
+      blocked: boolean;
+      index?: number;
+      /** The customer talked over this line. */
+      interrupted?: boolean;
+      /** Never read aloud: the customer was already talking. */
+      unspoken?: boolean;
+    }
   | { id: number; kind: "handoff"; from: AgentName; to: AgentName; reason: string }
   | { id: number; kind: "notice"; text: string; tone: "info" | "error" };
+
+export type Approval = { agent: AgentName; items: ApprovalItem[] };
 
 export interface ConversationState {
   sessionId: string | null;
@@ -27,12 +41,26 @@ export interface ConversationState {
   entries: Entry[];
   verified: boolean;
   customer: Customer | null;
-  approval: { agent: AgentName; items: ApprovalItem[] } | null;
+  /** Shown once the agent has finished asking for it, not when the server replies. */
+  approval: Approval | null;
   toolsRun: { agent: AgentName; tool: string }[];
   handoffs: Handoff[];
   diagnosis: TroubleshootDecision | null;
   escalation: Escalation | null;
   startedAt: number | null;
+}
+
+/** One line of a reply, with what appears in the transcript when it is spoken (the line, then any transfer marker). */
+export interface Segment {
+  message: AgentMessage;
+  entries: Entry[];
+}
+
+/** A reply ready to be played: its lines in order, and the approval card to show after them. */
+export interface Delivery {
+  reply: ConversationReply;
+  segments: Segment[];
+  approval: Approval | null;
 }
 
 const INITIAL: ConversationState = {
@@ -59,70 +87,74 @@ export function useConversation() {
   const nextId = useRef(1);
   const id = () => nextId.current++;
 
-  const addEntries = useCallback((entries: Entry[]) => {
-    setState((s) => ({ ...s, entries: [...s.entries, ...entries] }));
+  /** Adds lines to the transcript (the call screen does this as each line is spoken). */
+  const reveal = useCallback((entries: Entry[]) => {
+    if (entries.length) setState((s) => ({ ...s, entries: [...s.entries, ...entries] }));
   }, []);
 
-  /** Agent messages in order, with a transfer marker after the message that handed the call on. */
-  const toEntries = (reply: ConversationReply): Entry[] => {
-    const entries: Entry[] = [];
+  /** Shows the approval card, once the agent has finished asking. */
+  const revealApproval = useCallback((approval: Approval | null) => {
+    setState((s) => ({ ...s, approval }));
+  }, []);
+
+  /** Splits a reply into lines, each with its transcript entries (a transfer marker follows the line that transferred). */
+  const toSegments = (reply: ConversationReply): Segment[] => {
     const handoffs = [...reply.handoffs];
-    for (const message of reply.messages) {
-      entries.push({
-        id: id(),
-        kind: "agent",
-        agent: message.agent,
-        text: message.text,
-        index: message.index,
-        blocked: reply.status === "blocked" && message === reply.messages[reply.messages.length - 1],
-      });
-      const index = handoffs.findIndex((h) => h.from === message.agent);
-      if (index >= 0) {
-        const [handoff] = handoffs.splice(index, 1);
+    return reply.messages.map((message, i) => {
+      const entries: Entry[] = [
+        {
+          id: id(),
+          kind: "agent",
+          agent: message.agent,
+          text: message.text,
+          index: message.index,
+          blocked: reply.status === "blocked" && i === reply.messages.length - 1,
+        },
+      ];
+      const at = handoffs.findIndex((h) => h.from === message.agent);
+      if (at >= 0) {
+        const [handoff] = handoffs.splice(at, 1);
         entries.push({ id: id(), kind: "handoff", from: handoff.from, to: handoff.to, reason: handoff.reason });
       }
-    }
-    return entries;
+      return { message, entries };
+    });
   };
 
-  const apply = useCallback((reply: ConversationReply) => {
+  /** Applies everything except what is said: lines and the approval card wait until they are spoken. */
+  const apply = useCallback((reply: ConversationReply): Delivery => {
     const latestDiagnosis = [...reply.decisions].reverse().find((d) => d.agent === "troubleshoot")?.decision as
       | TroubleshootDecision
       | undefined;
-    const entries = toEntries(reply);
     setState((s) => ({
       ...s,
       sessionId: reply.sessionId,
       status: reply.status,
       activeAgent: reply.activeAgent,
-      entries: [...s.entries, ...entries],
       verified: reply.verified,
       customer: reply.customer,
-      approval: reply.approval ?? null,
       toolsRun: [...s.toolsRun, ...reply.toolsRun],
       handoffs: [...s.handoffs, ...reply.handoffs],
       diagnosis: latestDiagnosis ?? s.diagnosis,
       escalation: reply.escalation ?? s.escalation,
       startedAt: s.startedAt ?? Date.now(),
     }));
+    return { reply, segments: toSegments(reply), approval: reply.approval ?? null };
   }, []);
 
   const fail = useCallback(
     (err: unknown) => {
       const text = err instanceof ApiError ? err.message : "Something went wrong. Please try again.";
-      addEntries([{ id: id(), kind: "notice", text, tone: "error" }]);
+      reveal([{ id: id(), kind: "notice", text, tone: "error" }]);
     },
-    [addEntries],
+    [reveal],
   );
 
-  const start = useCallback(async (): Promise<ConversationReply | null> => {
+  const start = useCallback(async (): Promise<Delivery | null> => {
     nextId.current = 1;
     setState(INITIAL);
     setBusy(true);
     try {
-      const reply = await api.start();
-      apply(reply);
-      return reply;
+      return apply(await api.start());
     } catch (err) {
       fail(err);
       return null;
@@ -139,17 +171,16 @@ export function useConversation() {
    * and the reply to the earlier one comes back "superseded" and is ignored here.
    */
   const send = useCallback(
-    async (text: string, interrupted = false): Promise<ConversationReply | null> => {
+    async (text: string, interrupted = false): Promise<Delivery | null> => {
       const message = text.trim();
       if (!message || !state.sessionId) return null;
-      addEntries([{ id: id(), kind: "customer", text: message, private: CREDENTIALS.test(message) }]);
+      reveal([{ id: id(), kind: "customer", text: message, private: CREDENTIALS.test(message) }]);
       sending.current += 1;
       setBusy(true);
       try {
         const reply = await api.send(state.sessionId, message, interrupted);
         if (reply.status === "superseded") return null;
-        apply(reply);
-        return reply;
+        return apply(reply);
       } catch (err) {
         fail(err);
         return null;
@@ -158,23 +189,22 @@ export function useConversation() {
         if (sending.current === 0) setBusy(false);
       }
     },
-    [state.sessionId, addEntries, apply, fail],
+    [state.sessionId, reveal, apply, fail],
   );
 
+  /** Answers the pending check or change. `approval` is passed when its card is not on screen yet. */
   const answer = useCallback(
-    async (approve: boolean): Promise<ConversationReply | null> => {
-      const pending = state.approval;
+    async (approve: boolean, approval?: Approval): Promise<Delivery | null> => {
+      const pending = approval ?? state.approval;
       if (!pending || !state.sessionId || busy) return null;
       const what = pending.items
         .map((item) => (isCheckApproval(item) ? toolLabel(item.tool) : "the change"))
         .join(", ");
-      addEntries([{ id: id(), kind: "notice", text: `${approve ? "You allowed" : "You declined"}: ${what}`, tone: "info" }]);
+      reveal([{ id: id(), kind: "notice", text: `${approve ? "You allowed" : "You declined"}: ${what}`, tone: "info" }]);
       setState((s) => ({ ...s, approval: null }));
       setBusy(true);
       try {
-        const reply = await api.answer(state.sessionId, approve);
-        apply(reply);
-        return reply;
+        return apply(await api.answer(state.sessionId, approve));
       } catch (err) {
         fail(err);
         return null;
@@ -182,20 +212,22 @@ export function useConversation() {
         setBusy(false);
       }
     },
-    [state.approval, state.sessionId, busy, addEntries, apply, fail],
+    [state.approval, state.sessionId, busy, reveal, apply, fail],
   );
 
   const reset = useCallback(() => setState(INITIAL), []);
 
-  /** Marks an agent line the customer talked over. */
-  const markInterrupted = useCallback((index: number | undefined, text: string) => {
+  /** Flags an agent line that was cut off ("interrupted") or never read aloud ("unspoken"). */
+  const markLine = useCallback((message: AgentMessage, flag: "interrupted" | "unspoken") => {
     setState((s) => ({
       ...s,
       entries: s.entries.map((e) =>
-        e.kind === "agent" && (index !== undefined ? e.index === index : e.text === text) ? { ...e, interrupted: true } : e,
+        e.kind === "agent" && (message.index !== undefined ? e.index === message.index : e.text === message.text)
+          ? { ...e, [flag]: true }
+          : e,
       ),
     }));
   }, []);
 
-  return { state, busy, start, send, answer, reset, markInterrupted };
+  return { state, busy, start, send, answer, reset, reveal, revealApproval, markLine };
 }

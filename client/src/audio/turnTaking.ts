@@ -1,13 +1,12 @@
-/** How long a pause ends the customer's turn. */
-export const END_OF_TURN_MS = 1200;
-/** A longer pause allowed when the sentence clearly is not finished ("...and", "...because", "um"). */
-export const UNFINISHED_PAUSE_MS = 2200;
+const HESITATIONS = new Set(["uh", "um", "umm", "uhh", "hmm", "hm", "mm", "mmm", "mhm", "ah", "oh", "er", "erm", "huh"]);
 
-const TRAILING_CONNECTOR =
-  /\b(and|but|so|or|because|also|plus|then|like|with|the|a|an|my|to|of|for|is|it's|if|when|that|um+|uh+|er+|hmm+)\s*[.,…-]*\s*$/i;
+/** What speech transcribers tend to invent from background noise or silence. */
+const HALLUCINATIONS = /^(thanks for watching|you|bye|so)[.!?]*$/i;
 
-/** Whether the customer stopped mid-sentence, so we should wait a little longer before answering. */
-export function isUnfinished(text: string): boolean {
-  const trimmed = text.trim();
-  return trimmed.length > 0 && (TRAILING_CONNECTOR.test(trimmed) || /[,…-]\s*$/.test(trimmed));
+const wordsOf = (text: string) => text.toLowerCase().match(/[a-z0-9'-]+/g) ?? [];
+
+/** A transcript that is only noise: nothing, hesitations ("um", "mm"), or a phrase invented from background sound. */
+export function isNoise(text: string): boolean {
+  const real = wordsOf(text).filter((w) => !HESITATIONS.has(w));
+  return real.length === 0 || HALLUCINATIONS.test(text.trim());
 }

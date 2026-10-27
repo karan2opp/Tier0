@@ -1,36 +1,53 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AGENTS } from "../agents";
 import { api, type AgentMessage, type AgentName, type FillerKind, type Fillers } from "../api";
-import { MicVad } from "../audio/micVad";
-import { isUnfinished, UNFINISHED_PAUSE_MS } from "../audio/turnTaking";
+import { MicRecorder } from "../audio/micRecorder";
+import { isNoise } from "../audio/turnTaking";
 import { playTransferChime } from "../sounds";
 import { useSpeech } from "./useSpeech";
 
 /** browser: free, the browser's own speech. openai: natural voices, generated and transcribed by OpenAI. */
 export type VoiceEngine = "browser" | "openai";
 
+/** interrupted: the customer cut in; `line` is the first line they did not hear in full. */
 export type SpeakOutcome = { outcome: "done" } | { outcome: "interrupted"; line: AgentMessage };
 
-/**
- * What the microphone is for right now:
- * idle: nobody's turn (the agents are thinking), speech is ignored.
- * speaking: an agent is talking; customer speech interrupts it.
- * listening: the customer's turn (OpenAI engine); their next speech is recorded and transcribed.
- */
-type MicMode = "idle" | "speaking" | "listening";
-
-/** How long the "connecting you to..." moment lasts between two agents. */
-const TRANSFER_PAUSE_MS = 900;
-
-/** Speech that is mostly the agent's own words came from the speakers, not the customer. */
-function looksLikeEcho(heard: string, spoken: string): boolean {
-  const words = (text: string) => text.toLowerCase().match(/[a-z0-9']+/g) ?? [];
-  const heardWords = words(heard);
-  if (heardWords.length < 3) return false;
-  const spokenWords = new Set(words(spoken));
-  return heardWords.filter((w) => spokenWords.has(w)).length / heardWords.length >= 0.8;
+export interface ReplyHooks {
+  /** A line starts playing: show it now, so the screen matches what is heard. */
+  onLine: (line: AgentMessage, position: number) => void;
+  /** A line will not be read aloud (the customer is talking): show it anyway. */
+  onSkip: (line: AgentMessage, position: number) => void;
+  /** The call is being put through to another agent. */
+  onTransfer?: (to: AgentName) => void;
 }
 
+/**
+ * One thing to say. Everything audible goes through ONE queue and plays one item at a time, so voices never
+ * overlap or cut each other off. Only the customer can cut the queue short, by pressing to talk.
+ */
+interface QueueItem {
+  kind: "line" | "filler" | "transfer";
+  agent: AgentName;
+  text: string;
+  /** OpenAI audio, requested as soon as the item is queued so it is ready when its turn comes. */
+  audio?: HTMLAudioElement;
+  onStart: () => void;
+  /** Called exactly once: true if it played to the end, false if it was cut off or skipped. */
+  onDone: (played: boolean) => void;
+}
+
+/** A short breath between two things being said, so lines don't run into each other. */
+const GAP_MS = 300;
+/** How long the "connecting you to..." moment lasts between two agents. */
+const TRANSFER_PAUSE_MS = 900;
+const MIC_BLOCKED = "Microphone access is blocked. Allow it in your browser, or type instead.";
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * The call's voice. The agent's replies are spoken through one queue; the customer talks by holding a key or
+ * button (hold-to-talk): pressing stops the agent at once, and only what is said while holding is sent.
+ */
 export function useVoice({
   engine,
   enabled,
@@ -45,39 +62,34 @@ export function useVoice({
   onUtterance: (text: string, interrupted: boolean) => void;
 }) {
   const [speaking, setSpeaking] = useState(false);
-  const [listening, setListening] = useState(false);
-  const [hearing, setHearing] = useState(false);
+  const [holding, setHolding] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   /** The filler phrase being said right now ("Let me check that"), shown as a caption. */
   const [fillerText, setFillerText] = useState<string | null>(null);
-  const fillers = useRef<Fillers | null>(null);
-  const fillerTurn = useRef<Partial<Record<FillerKind, number>>>({});
-  const fillerPlaying = useRef(false);
 
   const onUtteranceRef = useRef(onUtterance);
   onUtteranceRef.current = onUtterance;
   const sessionRef = useRef(sessionId);
   sessionRef.current = sessionId;
 
-  const mode = useRef<MicMode>("idle");
-  const vad = useRef<MicVad | null>(null);
-  const audio = useRef<HTMLAudioElement | null>(null);
-  /** Set when the customer talks over the agent; the next thing they say is sent as an interruption. */
+  const recorder = useRef<MicRecorder | null>(null);
+  const holdingRef = useRef(false);
+  /** Set when the customer pressed to talk over the agent; their message is sent as an interruption. */
   const interrupted = useRef(false);
-  /** Ends the reply being spoken; set while speaking. */
-  const stopSpeaking = useRef<(() => void) | null>(null);
-  /** The line being spoken, to spot our own voice echoing back into the mic. */
-  const lastSpoken = useRef("");
 
-  /** OpenAI transcriptions, chained so they are delivered in the order they were spoken. */
-  const transcriptions = useRef(Promise.resolve());
+  /* ---------- The speaking queue ---------- */
+  const queue = useRef<QueueItem[]>([]);
+  const current = useRef<QueueItem | null>(null);
+  /** Stops the item playing now. */
+  const stopCurrent = useRef<(() => void) | null>(null);
+  /** Set when the customer cut the current item short. */
+  const currentCut = useRef(false);
+  const pumping = useRef(false);
+
+  const fillers = useRef<Fillers | null>(null);
+  const fillerTurn = useRef<Partial<Record<FillerKind, number>>>({});
   const pendingTranscripts = useRef(0);
-  /** An unfinished sentence ("...and"), held briefly in case the customer carries on. */
-  const held = useRef("");
-  const holdTimer = useRef<ReturnType<typeof setTimeout>>();
-  /** Bumped by every new reply, so an older reply still being spoken stops. */
-  const speakRun = useRef(0);
 
   const deliver = useCallback((text: string) => {
     const wasInterrupted = interrupted.current;
@@ -85,107 +97,17 @@ export function useVoice({
     onUtteranceRef.current(text, wasInterrupted);
   }, []);
 
-  /** They did not carry on after all: send what they said. */
-  const releaseHeld = useCallback(() => {
-    const text = held.current;
-    held.current = "";
-    if (text) deliver(text);
-  }, [deliver]);
-
   const browser = useSpeech(deliver);
   const browserRef = useRef(browser);
   browserRef.current = browser;
 
-  const setMode = (next: MicMode) => {
-    mode.current = next;
-    vad.current?.setGuarded(next === "speaking");
-    setListening(next === "listening");
-  };
+  const isBusy = () => Boolean(current.current) || queue.current.length > 0;
+  /** The customer is talking, or has said something not sent yet: nothing is spoken over them. */
+  const customerTalking = () => holdingRef.current || pendingTranscripts.current > 0;
 
-  /** Stops the agent mid-sentence because the customer started talking. */
-  const interrupt = useCallback(() => {
-    if (!stopSpeaking.current) return;
-    interrupted.current = true;
-    stopSpeaking.current();
-  }, []);
-
-  // The microphone stays open for the whole call: it records the customer (OpenAI engine) and,
-  // in both engines, notices when they start talking over the agent.
-  useEffect(() => {
-    if (!enabled || typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) return;
-    const mic = new MicVad({
-      onSpeechStart: () => {
-        // Never talk over the customer, not even with a filler.
-        if (fillerPlaying.current) stopSpeaking.current?.();
-        if (mode.current === "speaking") {
-          interrupt();
-          if (engine === "openai") {
-            setMode("listening");
-            setHearing(true);
-          } else {
-            vad.current?.reset();
-            browserRef.current.listen();
-          }
-          return;
-        }
-        if (mode.current === "listening" && engine === "openai") {
-          // They are carrying on: wait for the rest instead of sending the unfinished part.
-          clearTimeout(holdTimer.current);
-          setHearing(true);
-        } else vad.current?.reset();
-      },
-      onSpeechEnd: (wav) => {
-        setHearing(false);
-        if (engine !== "openai" || mode.current !== "listening" || !wav || !sessionRef.current) return;
-        // Keep listening while this is transcribed and answered: anything the customer adds is sent too,
-        // and the server folds it into the same answer. Transcriptions run in order, one at a time.
-        const session = sessionRef.current;
-        pendingTranscripts.current += 1;
-        setTranscribing(true);
-        transcriptions.current = transcriptions.current.then(async () => {
-          try {
-            const text = await api.transcribe(session, wav);
-            if (!text || looksLikeEcho(text, lastSpoken.current)) return;
-            const sofar = held.current ? `${held.current} ${text}` : text;
-            clearTimeout(holdTimer.current);
-            if (isUnfinished(sofar)) {
-              // "My battery drains fast and..." - give them a moment to finish before answering.
-              held.current = sofar;
-              holdTimer.current = setTimeout(releaseHeld, UNFINISHED_PAUSE_MS);
-              return;
-            }
-            held.current = "";
-            setError(null);
-            deliver(sofar);
-          } catch {
-            setError("Sorry, I couldn't catch that. Please say it again, or type it.");
-          } finally {
-            pendingTranscripts.current -= 1;
-            if (pendingTranscripts.current === 0) setTranscribing(false);
-          }
-        });
-      },
-    });
-    vad.current = mic;
-    mic.start().catch(() => {
-      vad.current = null;
-      setError(
-        engine === "openai"
-          ? "Microphone access is blocked. Allow it in your browser, or type instead."
-          : "Interruptions need microphone access; you can still tap the mic to talk.",
-      );
-    });
-    return () => {
-      mic.stop();
-      vad.current = null;
-    };
-  }, [enabled, engine, interrupt, deliver, releaseHeld]);
-
-  /** Plays one line from OpenAI audio. Resolves false if it could not be played (the caller falls back). */
-  const playOpenAI = (line: AgentMessage, preloaded?: HTMLAudioElement) =>
+  /** Plays an audio element; resolves true if it played to the end. */
+  const playAudio = (el: HTMLAudioElement) =>
     new Promise<boolean>((resolve) => {
-      const el = preloaded ?? new Audio(api.speechUrl(sessionRef.current!, line.index!));
-      audio.current = el;
       let settled = false;
       const done = (ok: boolean) => {
         if (settled) return;
@@ -195,100 +117,154 @@ export function useVoice({
       };
       el.onended = () => done(true);
       el.onerror = () => done(false);
-      stopSpeaking.current = () => {
+      stopCurrent.current = () => {
         el.pause();
         el.removeAttribute("src");
         el.load(); // cancels the download, so the server stops generating
-        done(true);
+        done(false);
       };
       el.play().catch(() => done(false));
     });
 
+  /** Says one item. OpenAI audio when there is some, the browser voice otherwise (also the fallback). */
+  const playItem = async (item: QueueItem) => {
+    if (item.kind === "transfer") {
+      // A short "connecting" moment, like a call being put through, before the next agent speaks.
+      stopCurrent.current = () => {};
+      await playTransferChime();
+      await sleep(TRANSFER_PAUSE_MS);
+      return;
+    }
+    if (item.audio && (await playAudio(item.audio))) return;
+    if (currentCut.current) return;
+    stopCurrent.current = () => browserRef.current.cancelSpeech();
+    await browserRef.current.speak(item.text, AGENTS[item.agent]);
+  };
+
+  /** Plays the queue to the end, one item at a time, with a short gap between items. */
+  const pump = useCallback(async () => {
+    if (pumping.current) return;
+    pumping.current = true;
+    try {
+      while (queue.current.length > 0) {
+        const item = queue.current.shift()!;
+        // A filler only fills silence: if real words are already waiting, it is dropped.
+        if (item.kind === "filler" && queue.current.some((next) => next.kind !== "filler")) {
+          item.audio?.removeAttribute("src");
+          item.onDone(false);
+          continue;
+        }
+        setSpeaking(item.kind !== "filler");
+        current.current = item;
+        currentCut.current = false;
+        item.onStart();
+
+        await playItem(item);
+
+        const played = !currentCut.current;
+        current.current = null;
+        stopCurrent.current = null;
+        item.onDone(played);
+        if (queue.current.length > 0) await sleep(GAP_MS);
+      }
+    } finally {
+      pumping.current = false;
+      setSpeaking(false);
+    }
+  }, [engine]);
+
+  /** Empties the queue and stops what is playing. Everything not heard in full reports itself as not played. */
+  const clearQueue = useCallback(() => {
+    const pending = queue.current;
+    queue.current = [];
+    for (const item of pending) {
+      item.audio?.removeAttribute("src");
+      item.onDone(false);
+    }
+    if (current.current) {
+      currentCut.current = true;
+      stopCurrent.current?.();
+    }
+  }, []);
+
+  /** Stops whatever is being said. Returns false if nothing was. */
+  const interrupt = useCallback(() => {
+    if (!isBusy()) return false;
+    // Only real words count as an interruption (cutting off a filler is not worth telling the agent about).
+    if ([current.current, ...queue.current].some((item) => item?.kind === "line")) interrupted.current = true;
+    clearQueue();
+    return true;
+  }, [clearQueue]);
+
+  const audioFor = (url: string | null) => {
+    if (engine !== "openai" || !url) return undefined;
+    const el = new Audio(url);
+    el.preload = "auto";
+    return el;
+  };
+
   /**
-   * Speaks a reply line by line (a chime marks a transfer to another agent). Stops at once if the customer
-   * interrupts, and says which line they cut off.
+   * Queues a reply to be spoken after anything already being said. Each line is shown as it starts; a transfer
+   * between agents gets its "connecting" moment. Resolves when the whole reply has been said, or cut short.
    */
-  const speak = useCallback(
-    async (
-      lines: AgentMessage[],
-      onLine: (line: AgentMessage) => void,
-      onTransfer?: (to: AgentMessage["agent"]) => void,
-    ): Promise<SpeakOutcome> => {
-      // A newer reply replaces one that is still being spoken.
-      const run = ++speakRun.current;
-      stopSpeaking.current?.();
-
-      // The customer is mid-sentence, or has said something we have not sent yet: this reply is already out
-      // of date, so it is shown but not spoken over them. Their words become the next message.
-      const customerTalking =
-        vad.current?.isSpeaking ||
-        pendingTranscripts.current > 0 ||
-        Boolean(held.current) ||
-        (engine === "browser" && Boolean(browserRef.current.interim));
-      if (customerTalking && lines.length > 0) {
-        onLine(lines[lines.length - 1]);
-        return { outcome: "interrupted", line: lines[0] };
+  const say = useCallback(
+    (lines: AgentMessage[], hooks: ReplyHooks): Promise<SpeakOutcome> => {
+      if (lines.length === 0) return Promise.resolve({ outcome: "done" });
+      // The customer is talking: don't talk over them. Show the reply; their words become the next message.
+      if (customerTalking()) {
+        lines.forEach((line, i) => hooks.onSkip(line, i));
+        return Promise.resolve({ outcome: "interrupted", line: lines[0] });
       }
 
-      // Browser recognition would hear the agent's own voice, so it pauses while the agent talks.
-      if (engine === "browser") browserRef.current.abortListening();
-      interrupted.current = false;
-      setMode("speaking");
-      setSpeaking(true);
-      // Start generating every OpenAI line at once, so the second agent after a transfer is ready to talk.
-      const preloaded =
-        engine === "openai" && sessionRef.current
-          ? lines.map((line) => {
-              if (line.index === undefined) return undefined;
-              const el = new Audio(api.speechUrl(sessionRef.current!, line.index));
-              el.preload = "auto";
-              return el;
-            })
-          : [];
+      return new Promise((resolve) => {
+        const items: QueueItem[] = [];
+        let firstMissed: number | null = null;
+        let remaining = 0;
+        const settle = () => {
+          remaining -= 1;
+          if (remaining > 0) return;
+          resolve(firstMissed === null ? { outcome: "done" } : { outcome: "interrupted", line: lines[firstMissed] });
+        };
 
-      try {
-        for (let i = 0; i < lines.length; i++) {
-          const line = lines[i];
+        lines.forEach((line, i) => {
           if (i > 0 && line.agent !== lines[i - 1].agent) {
-            // A short "connecting" moment, like a call being put through, before the next agent speaks.
-            onTransfer?.(line.agent);
-            await playTransferChime();
-            await new Promise((resolve) => setTimeout(resolve, TRANSFER_PAUSE_MS));
+            items.push({
+              kind: "transfer",
+              agent: line.agent,
+              text: "",
+              onStart: () => hooks.onTransfer?.(line.agent),
+              onDone: settle,
+            });
           }
-          if (run !== speakRun.current) return { outcome: "done" };
-          if (interrupted.current) return { outcome: "interrupted", line: lines[i - 1] ?? line };
-          lastSpoken.current = line.text;
-          onLine(line);
-
-          let played = false;
-          if (engine === "openai" && line.index !== undefined && sessionRef.current) {
-            played = await playOpenAI(line, preloaded[i]);
-          }
-          if (run !== speakRun.current) return { outcome: "done" };
-          if (!played && !interrupted.current) {
-            // Browser voice: also the fallback if OpenAI audio failed.
-            stopSpeaking.current = () => browserRef.current.cancelSpeech();
-            await browserRef.current.speak(line.text, AGENTS[line.agent]);
-          }
-          if (interrupted.current) return { outcome: "interrupted", line };
-        }
-        return { outcome: "done" };
-      } finally {
-        preloaded.forEach((el) => {
-          if (el && el !== audio.current) el.removeAttribute("src");
+          let started = false;
+          const url = line.index !== undefined && sessionRef.current ? api.speechUrl(sessionRef.current, line.index) : null;
+          items.push({
+            kind: "line",
+            agent: line.agent,
+            text: line.text,
+            audio: audioFor(url),
+            onStart: () => {
+              started = true;
+              hooks.onLine(line, i);
+            },
+            onDone: (played) => {
+              if (!played) {
+                firstMissed = firstMissed === null ? i : Math.min(firstMissed, i);
+                if (!started) hooks.onSkip(line, i);
+              }
+              settle();
+            },
+          });
         });
-        // A newer reply has taken over; leave its state alone.
-        if (run === speakRun.current) {
-          stopSpeaking.current = null;
-          setSpeaking(false);
-          if (mode.current === "speaking") setMode("idle");
-        }
-      }
+
+        remaining = items.length;
+        queue.current.push(...items);
+        void pump();
+      });
     },
-    [engine],
+    [engine, pump],
   );
 
-  /** The customer's turn: record their next sentence (OpenAI) or start speech recognition (browser). */
   useEffect(() => {
     if (!enabled) return;
     api
@@ -299,118 +275,127 @@ export function useVoice({
 
   /**
    * Says a short filler phrase in the agent's voice while it works ("Okay, let me check that for you."), so the
-   * line never goes quiet. Skipped if anyone is talking; a real reply cuts it off straight away.
+   * line never goes quiet. Only into silence: never over the customer, never ahead of real words.
    */
   const fill = useCallback(
-    async (kind: FillerKind, agent: AgentName) => {
+    (kind: FillerKind, agent: AgentName) => {
       const list = fillers.current?.[kind];
-      if (!list?.length || agent === "human_agent") return;
-      const customerTalking =
-        vad.current?.isSpeaking ||
-        pendingTranscripts.current > 0 ||
-        Boolean(held.current) ||
-        (engine === "browser" && Boolean(browserRef.current.interim));
-      if (stopSpeaking.current || customerTalking) return;
-
+      if (!list?.length || agent === "human_agent" || isBusy() || customerTalking()) return;
       const index = ((fillerTurn.current[kind] ?? -1) + 1) % list.length;
       fillerTurn.current[kind] = index;
       const text = list[index];
-      const run = speakRun.current;
-      lastSpoken.current = text;
-      fillerPlaying.current = true;
-      setFillerText(text);
-      vad.current?.setGuarded(true);
-      // Browser recognition would hear the filler, so it pauses for those two seconds.
-      const resumeListening = engine === "browser" && browserRef.current.listening;
-      if (engine === "browser") browserRef.current.abortListening();
-
-      try {
-        if (engine === "openai") {
-          await new Promise<void>((resolve) => {
-            const el = new Audio(api.fillerUrl(agent, kind, index));
-            const done = () => {
-              el.onended = el.onerror = null;
-              resolve();
-            };
-            el.onended = done;
-            el.onerror = done;
-            stopSpeaking.current = () => {
-              el.pause();
-              el.removeAttribute("src");
-              el.load();
-              done();
-            };
-            el.play().catch(done);
-          });
-        } else {
-          stopSpeaking.current = () => browserRef.current.cancelSpeech();
-          await browserRef.current.speak(text, AGENTS[agent]);
-        }
-      } finally {
-        fillerPlaying.current = false;
-        setFillerText(null);
-        // A real reply may have started meanwhile; leave its state alone.
-        if (run === speakRun.current) {
-          stopSpeaking.current = null;
-          vad.current?.setGuarded(mode.current === "speaking");
-          if (resumeListening) browserRef.current.listen();
-        }
-      }
+      queue.current.push({
+        kind: "filler",
+        agent,
+        text,
+        audio: audioFor(api.fillerUrl(agent, kind, index)),
+        onStart: () => setFillerText(text),
+        onDone: () => setFillerText(null),
+      });
+      void pump();
     },
-    [engine],
+    [engine, pump],
   );
 
-  const listen = useCallback(() => {
+  // OpenAI voice: the microphone opens once for the call; audio is only kept while the customer holds to talk.
+  useEffect(() => {
+    if (!enabled || engine !== "openai" || typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+      return;
+    }
+    const mic = new MicRecorder();
+    recorder.current = mic;
+    mic.start().catch(() => {
+      recorder.current = null;
+      setError(MIC_BLOCKED);
+    });
+    return () => {
+      mic.stop();
+      recorder.current = null;
+    };
+  }, [enabled, engine]);
+
+  /** Sends the customer's recording for transcription; noise ("um", or words invented from silence) is dropped. */
+  const transcribe = (wav: Blob) => {
+    const session = sessionRef.current;
+    if (!session) return;
+    pendingTranscripts.current += 1;
+    setTranscribing(true);
+    api
+      .transcribe(session, wav)
+      .then((text) => {
+        if (text && !isNoise(text)) {
+          setError(null);
+          deliver(text);
+        } else {
+          interrupted.current = false;
+        }
+      })
+      .catch(() => setError("Sorry, I couldn't catch that. Please try again, or type it."))
+      .finally(() => {
+        pendingTranscripts.current -= 1;
+        if (pendingTranscripts.current === 0) setTranscribing(false);
+      });
+  };
+
+  /** Pressed to talk: the agent stops at once, and only what is said while holding is recorded. */
+  const pressTalk = useCallback(() => {
+    if (holdingRef.current) return;
+    if (engine === "openai" && !recorder.current?.ready) {
+      setError(MIC_BLOCKED);
+      return;
+    }
+    holdingRef.current = true;
+    setHolding(true);
     setError(null);
+    interrupt();
+    if (engine === "openai") recorder.current!.begin();
+    else browserRef.current.listen();
+  }, [engine, interrupt]);
+
+  /** Released: what they said is sent. */
+  const releaseTalk = useCallback(() => {
+    if (!holdingRef.current) return;
+    holdingRef.current = false;
+    setHolding(false);
     if (engine === "openai") {
-      if (!vad.current) return setError("Microphone access is blocked. Allow it in your browser, or type instead.");
-      setMode("listening");
+      const wav = recorder.current?.end() ?? null;
+      if (wav) transcribe(wav);
+      else interrupted.current = false;
     } else {
-      setMode("idle");
-      browserRef.current.listen();
+      browserRef.current.stopListening();
     }
   }, [engine]);
 
-  /** Stop listening and send what was heard so far. */
-  const stopListening = useCallback(() => {
-    if (engine === "openai") {
-      if (vad.current?.isSpeaking) vad.current.flush();
-      else setMode("idle");
-    } else browserRef.current.stopListening();
-  }, [engine]);
-
-  /** Stop listening and throw away what was heard (the customer typed instead). */
-  const cancelListening = useCallback(() => {
-    vad.current?.reset();
-    clearTimeout(holdTimer.current);
-    held.current = "";
-    setHearing(false);
-    if (mode.current === "listening") setMode("idle");
+  /** Throws away what is being said (the customer typed instead). */
+  const cancelTalk = useCallback(() => {
+    holdingRef.current = false;
+    setHolding(false);
+    recorder.current?.cancel();
     browserRef.current.abortListening();
   }, []);
 
+  /** Silence everything (e.g. the call ended). */
   const stopAll = useCallback(() => {
-    stopSpeaking.current?.();
-    cancelListening();
-  }, [cancelListening]);
+    clearQueue();
+    cancelTalk();
+  }, [clearQueue, cancelTalk]);
 
-  useEffect(() => () => stopSpeaking.current?.(), []);
+  useEffect(() => () => clearQueue(), [clearQueue]);
 
   return {
+    say,
     fill,
     fillerText,
-    canListen: engine === "openai" ? enabled : browser.canListen,
+    holding,
+    pressTalk,
+    releaseTalk,
+    canTalk: enabled && (engine === "openai" || browser.canListen),
     speaking,
-    listening: listening || browser.listening,
-    hearing: hearing || (browser.listening && Boolean(browser.interim)),
     transcribing,
     interim: browser.interim,
     error: error ?? browser.micError ?? browser.voiceError,
-    speak,
     interrupt,
-    listen,
-    stopListening,
-    cancelListening,
+    cancelTalk,
     stopAll,
   };
 }

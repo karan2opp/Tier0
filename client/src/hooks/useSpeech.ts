@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentMeta } from "../agents";
-import { END_OF_TURN_MS, isUnfinished, UNFINISHED_PAUSE_MS } from "../audio/turnTaking";
 
 /* Minimal typings: the Web Speech recognition API is not in TypeScript's DOM lib. */
 interface RecognitionResult {
@@ -77,49 +76,40 @@ export function useSpeech(onFinal: (text: string) => void) {
     };
   }, [canSpeak]);
 
-  /** Keep listening across sentences (and while the agent thinks) until told to stop. */
+  /** Hold-to-talk is held down: keep listening (Chrome ends sessions now and then; they are restarted). */
   const keepListening = useRef(false);
-  /** Sends what has been heard so far, if anything. Set while a recognition session runs. */
-  const flushHeard = useRef<(() => void) | null>(null);
+  /** Released: the last words are still arriving; send everything once recognition has finished. */
+  const releasing = useRef(false);
+  /** Everything heard since the press, across restarts. */
+  const heard = useRef("");
+  const pending = useRef("");
+  const releaseTimer = useRef<ReturnType<typeof setTimeout>>();
 
-  /**
-   * Listens continuously. Each time the customer pauses long enough (longer when they stopped mid-sentence),
-   * what they said is sent, and listening carries on, so they can add more while the agent is thinking.
-   */
-  const listen = useCallback(() => {
-    if (!Ctor) return;
-    keepListening.current = true;
-    if (recognition.current) return;
+  const sendHeard = useCallback(() => {
+    clearTimeout(releaseTimer.current);
+    releasing.current = false;
+    const text = `${heard.current} ${pending.current}`.trim();
+    heard.current = "";
+    pending.current = "";
+    setInterim("");
+    if (text) onFinalRef.current(text);
+  }, []);
 
+  const startSession = useCallback(() => {
+    if (!Ctor || recognition.current) return;
     const rec = new Ctor();
     rec.lang = "en-IN";
     rec.interimResults = true;
     rec.continuous = true;
-    let heard = "";
-    let pending = "";
-    let pause: ReturnType<typeof setTimeout> | undefined;
-
-    const flush = () => {
-      clearTimeout(pause);
-      const text = `${heard} ${pending}`.trim();
-      heard = "";
-      pending = "";
-      setInterim("");
-      if (text) onFinalRef.current(text);
-    };
-    flushHeard.current = flush;
 
     rec.onresult = (event) => {
-      pending = "";
+      pending.current = "";
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const result = event.results[i];
-        if (result.isFinal) heard = `${heard} ${result[0].transcript}`.trim();
-        else pending += result[0].transcript;
+        if (result.isFinal) heard.current = `${heard.current} ${result[0].transcript}`.trim();
+        else pending.current += result[0].transcript;
       }
-      const sofar = `${heard} ${pending}`.trim();
-      setInterim(sofar);
-      clearTimeout(pause);
-      pause = setTimeout(flush, isUnfinished(sofar) ? UNFINISHED_PAUSE_MS : END_OF_TURN_MS);
+      setInterim(`${heard.current} ${pending.current}`.trim());
     };
     rec.onerror = (event) => {
       if (event.error === "not-allowed" || event.error === "service-not-allowed") {
@@ -129,11 +119,12 @@ export function useSpeech(onFinal: (text: string) => void) {
     };
     rec.onend = () => {
       recognition.current = null;
-      flushHeard.current = null;
-      flush();
-      // Chrome ends long sessions now and then; quietly start again if we are still meant to listen.
-      if (keepListening.current) setTimeout(() => keepListening.current && listenRef.current(), 150);
-      else setListening(false);
+      if (keepListening.current) {
+        setTimeout(() => keepListening.current && startSessionRef.current(), 100);
+        return;
+      }
+      setListening(false);
+      if (releasing.current) sendHeard();
     };
 
     recognition.current = rec;
@@ -143,31 +134,47 @@ export function useSpeech(onFinal: (text: string) => void) {
       rec.start();
     } catch {
       recognition.current = null;
-      flushHeard.current = null;
       setListening(false);
     }
-  }, [Ctor]);
-  const listenRef = useRef(listen);
-  listenRef.current = listen;
+  }, [Ctor, sendHeard]);
+  const startSessionRef = useRef(startSession);
+  startSessionRef.current = startSession;
 
-  /** Stops listening and sends what was heard. */
+  /** Pressed: start listening, from a clean slate. */
+  const listen = useCallback(() => {
+    if (!Ctor) return;
+    if (!keepListening.current && !releasing.current) {
+      heard.current = "";
+      pending.current = "";
+    }
+    keepListening.current = true;
+    startSession();
+  }, [Ctor, startSession]);
+
+  /** Released: stop listening and send everything heard (once the last words have come in). */
   const stopListening = useCallback(() => {
     keepListening.current = false;
-    flushHeard.current?.();
-    recognition.current?.stop();
-  }, []);
+    releasing.current = true;
+    if (!recognition.current) return sendHeard();
+    recognition.current.stop();
+    // If the browser never reports the end, send what we have anyway.
+    releaseTimer.current = setTimeout(sendHeard, 1500);
+  }, [sendHeard]);
 
   /** Stops listening and throws away what was heard. */
   const abortListening = useCallback(() => {
     keepListening.current = false;
+    releasing.current = false;
+    clearTimeout(releaseTimer.current);
+    heard.current = "";
+    pending.current = "";
+    setInterim("");
     const rec = recognition.current;
     if (!rec) return;
     rec.onend = null;
     rec.abort();
     recognition.current = null;
-    flushHeard.current = null;
     setListening(false);
-    setInterim("");
   }, []);
 
   const pickVoice = useCallback(
@@ -241,8 +248,21 @@ export function useSpeech(onFinal: (text: string) => void) {
 
   const cancelSpeech = useCallback(() => {
     speechRun.current++;
-    if (canSpeak) window.speechSynthesis.cancel();
+    if (canSpeak) {
+      window.speechSynthesis.cancel();
+      // A cancel while paused can leave the engine paused, and the next reply would be silent.
+      window.speechSynthesis.resume();
+    }
     setSpeaking(false);
+  }, [canSpeak]);
+
+  /** Holds the agent mid-sentence (e.g. while checking whether the customer is cutting in). */
+  const pauseSpeech = useCallback(() => {
+    if (canSpeak) window.speechSynthesis.pause();
+  }, [canSpeak]);
+
+  const resumeSpeech = useCallback(() => {
+    if (canSpeak) window.speechSynthesis.resume();
   }, [canSpeak]);
 
   useEffect(() => () => recognition.current?.abort(), []);
@@ -260,5 +280,7 @@ export function useSpeech(onFinal: (text: string) => void) {
     abortListening,
     speak,
     cancelSpeech,
+    pauseSpeech,
+    resumeSpeech,
   };
 }

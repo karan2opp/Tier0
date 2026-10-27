@@ -1,13 +1,8 @@
 /**
- * Microphone + voice activity detection (VAD).
- *
- * Listens continuously and reports when the customer starts and stops talking. Each stretch of speech is
- * returned as a 16 kHz mono WAV (with a little audio from just before speech began, so first words are kept).
- * While an agent is speaking, "guarded" mode needs louder, longer speech, so the agent's own voice coming
- * out of the speakers is less likely to count as the customer interrupting.
+ * Hold-to-talk recorder. The microphone stays open during the call, but audio is only kept between press and
+ * release, plus a fraction of a second from just before the press, so the first word is never clipped.
+ * The recording is returned as a 16 kHz mono WAV, which is all a transcriber needs.
  */
-
-import { END_OF_TURN_MS } from "./turnTaking";
 
 const WORKLET = `
 class Tier0MicTap extends AudioWorkletProcessor {
@@ -26,36 +21,20 @@ class Tier0MicTap extends AudioWorkletProcessor {
 registerProcessor("tier0-mic-tap", Tier0MicTap);
 `;
 
-const PREROLL_MS = 350;
-const MIN_THRESHOLD = 0.012;
-const START_MS = 150;
-const GUARDED_START_MS = 320;
-const GUARDED_FACTOR = 2.6;
-const END_SILENCE_MS = END_OF_TURN_MS;
-const MAX_SEGMENT_MS = 25_000;
-const MIN_SPEECH_MS = 300;
+const PREROLL_MS = 300;
+/** Shorter than this is a slip of the finger, not speech. */
+const MIN_RECORDING_MS = 400;
+const MAX_RECORDING_MS = 30_000;
 const TARGET_RATE = 16_000;
 
-export interface VadCallbacks {
-  onSpeechStart: () => void;
-  /** The finished recording, or null when it was too short to be speech (a cough, a click). */
-  onSpeechEnd: (wav: Blob | null) => void;
-}
-
-export class MicVad {
+export class MicRecorder {
   private ctx?: AudioContext;
   private stream?: MediaStream;
   private stopped = false;
-  private guarded = false;
-  private floor = 0.004;
-  private aboveMs = 0;
-  private speaking = false;
-  private silenceMs = 0;
-  private segmentMs = 0;
+  private recording = false;
+  private recordedMs = 0;
   private preroll: Float32Array[] = [];
-  private segment: Float32Array[] = [];
-
-  constructor(private readonly callbacks: VadCallbacks) {}
+  private chunks: Float32Array[] = [];
 
   async start() {
     const stream = await navigator.mediaDevices.getUserMedia({
@@ -70,7 +49,7 @@ export class MicVad {
     await ctx.audioWorklet.addModule(url);
     URL.revokeObjectURL(url);
 
-    const source = ctx.createMediaStreamSource(this.stream);
+    const source = ctx.createMediaStreamSource(stream);
     const tap = new AudioWorkletNode(ctx, "tier0-mic-tap");
     tap.port.onmessage = (event) => this.process(event.data as Float32Array);
     // Connected through a muted gain so the browser keeps processing it; the mic is never played back.
@@ -80,77 +59,57 @@ export class MicVad {
     if (ctx.state === "suspended") await ctx.resume();
   }
 
-  setGuarded(guarded: boolean) {
-    this.guarded = guarded;
-    this.aboveMs = 0;
+  get ready() {
+    return Boolean(this.stream);
   }
 
-  /** Ends the current recording now (e.g. the customer tapped "send"). */
-  flush() {
-    if (this.speaking) this.finish();
+  /** Pressed: record from now (plus the moment just before) until release. */
+  begin() {
+    if (this.recording) return;
+    void this.ctx?.resume();
+    this.recording = true;
+    this.chunks = this.preroll;
+    this.recordedMs = 0;
+    this.preroll = [];
   }
 
-  /** Throws away anything being recorded. */
-  reset() {
-    this.speaking = false;
-    this.aboveMs = 0;
-    this.segment = [];
-    this.segmentMs = 0;
+  /** Released: the recording, or null if it was too short to be speech. */
+  end(): Blob | null {
+    if (!this.recording) return null;
+    this.recording = false;
+    const wav = this.recordedMs >= MIN_RECORDING_MS ? encodeWav(this.chunks, this.ctx?.sampleRate ?? 48_000) : null;
+    this.chunks = [];
+    return wav;
   }
 
-  get isSpeaking() {
-    return this.speaking;
+  /** Throws away what is being recorded. */
+  cancel() {
+    this.recording = false;
+    this.chunks = [];
   }
 
   stop() {
     this.stopped = true;
+    this.cancel();
     this.stream?.getTracks().forEach((track) => track.stop());
     void this.ctx?.close().catch(() => {});
-    this.reset();
   }
 
   private process(chunk: Float32Array) {
-    const rate = this.ctx?.sampleRate ?? 48_000;
-    const ms = (chunk.length / rate) * 1000;
-    let sum = 0;
-    for (let i = 0; i < chunk.length; i++) sum += chunk[i] * chunk[i];
-    const rms = Math.sqrt(sum / chunk.length);
-    const threshold = Math.max(MIN_THRESHOLD, this.floor * 3);
-
-    if (!this.speaking) {
-      this.preroll.push(chunk);
-      while (this.preroll.length * ms > PREROLL_MS) this.preroll.shift();
-      // Learn the room's background noise from quiet moments only.
-      if (rms < threshold) this.floor = this.floor * 0.97 + rms * 0.03;
-
-      const start = threshold * (this.guarded ? GUARDED_FACTOR : 1);
-      this.aboveMs = rms > start ? this.aboveMs + ms : Math.max(0, this.aboveMs - ms * 2);
-      if (this.aboveMs >= (this.guarded ? GUARDED_START_MS : START_MS)) {
-        this.speaking = true;
-        this.segment = this.preroll;
-        this.segmentMs = this.preroll.length * ms;
-        this.preroll = [];
-        this.silenceMs = 0;
-        this.callbacks.onSpeechStart();
+    const ms = (chunk.length / (this.ctx?.sampleRate ?? 48_000)) * 1000;
+    if (this.recording) {
+      if (this.recordedMs < MAX_RECORDING_MS) {
+        this.chunks.push(chunk);
+        this.recordedMs += ms;
       }
       return;
     }
-
-    this.segment.push(chunk);
-    this.segmentMs += ms;
-    this.silenceMs = rms < threshold * 0.7 ? this.silenceMs + ms : 0;
-    if (this.silenceMs >= END_SILENCE_MS || this.segmentMs >= MAX_SEGMENT_MS) this.finish();
-  }
-
-  private finish() {
-    const spokenMs = this.segmentMs - this.silenceMs - PREROLL_MS;
-    const wav = spokenMs >= MIN_SPEECH_MS ? encodeWav(this.segment, this.ctx?.sampleRate ?? 48_000) : null;
-    this.reset();
-    this.callbacks.onSpeechEnd(wav);
+    this.preroll.push(chunk);
+    while (this.preroll.length * ms > PREROLL_MS) this.preroll.shift();
   }
 }
 
-/** Float samples at the mic's rate -> 16-bit PCM WAV at 16 kHz (small uploads, all a transcriber needs). */
+/** Float samples at the mic's rate -> 16-bit PCM WAV at 16 kHz (small uploads). */
 function encodeWav(chunks: Float32Array[], rate: number): Blob {
   const total = chunks.reduce((n, c) => n + c.length, 0);
   const input = new Float32Array(total);

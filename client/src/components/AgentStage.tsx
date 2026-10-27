@@ -89,7 +89,7 @@ export function AgentStage({
         {phase === "listening" ? (
           <p className="caption-you">
             <span>You</span>
-            {interim || (hearing ? "Hearing you..." : "Go ahead, I'm listening...")}
+            {interim || "Listening... let go to send"}
           </p>
         ) : phase === "transferring" ? (
           <p className="caption-transfer">Connecting you to our {meta.name.toLowerCase()}...</p>
@@ -105,7 +105,7 @@ export function AgentStage({
               <i />
               <i />
             </span>
-            {note ? <span className="caption-note">{note}</span> : canListen && <small>Thinking. You can keep talking.</small>}
+            {note ? <span className="caption-note">{note}</span> : canListen && <small>Thinking. Hold Space to add something.</small>}
           </div>
         ) : (
           caption && <p className="caption-agent">{caption}</p>

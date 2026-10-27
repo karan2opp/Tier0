@@ -63,7 +63,7 @@ export function ApprovalCard({
           <Icon name="check" size={16} /> {isCheck ? "Allow check" : "Confirm"}
         </button>
       </div>
-      {canListen && <p className="approval-hint">You can also just say "yes" or "no".</p>}
+      {canListen && <p className="approval-hint">Or hold Space and say "yes" or "no".</p>}
     </div>
   );
 }

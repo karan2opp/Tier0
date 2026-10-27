@@ -129,7 +129,7 @@ export function Lobby({
             Use my voice
             <small>
               {canUseVoice
-                ? "Talk naturally and interrupt anytime. Your browser will ask for the microphone."
+                ? "Hold Space or the mic button to talk; the agent stops the moment you do. Your browser will ask for the microphone."
                 : "Voice needs Chrome or Edge here; you can type instead"}
             </small>
           </span>
@@ -162,7 +162,6 @@ export function Lobby({
           </div>
         )}
 
-        {voice && canUseVoice && <p className="voice-tip">Tip: use headphones so the agent doesn't hear itself.</p>}
 
         {speech.canSpeak && (
           <div className="sound-test">

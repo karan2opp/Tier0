@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { ConversationReply } from "./api";
+import type { Delivery } from "./hooks/useConversation";
 import { CallScreen } from "./components/CallScreen";
 import { EndScreen } from "./components/EndScreen";
 import { Lobby } from "./components/Lobby";
@@ -19,7 +19,7 @@ export default function App() {
   const [screen, setScreen] = useState<Screen>("lobby");
   const [voice, setVoice] = useState(false);
   const [engine, setEngine] = useState<VoiceEngine>("browser");
-  const [greeting, setGreeting] = useState<ConversationReply | null>(null);
+  const [greeting, setGreeting] = useState<Delivery | null>(null);
   const [callKey, setCallKey] = useState(0);
 
   const startCall = async (withVoice: boolean, voiceEngine: VoiceEngine = engine) => {

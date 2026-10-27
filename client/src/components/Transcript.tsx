@@ -42,7 +42,11 @@ export function Transcript({ entries, busy }: { entries: Entry[]; busy: boolean 
                     )}
                     {entry.text}
                   </div>
-                  {entry.interrupted && <span className="interrupted-note">You interrupted here</span>}
+                  {entry.unspoken ? (
+                    <span className="interrupted-note">Not read aloud: you were talking</span>
+                  ) : (
+                    entry.interrupted && <span className="interrupted-note">You interrupted here</span>
+                  )}
                 </div>
               </div>
             );

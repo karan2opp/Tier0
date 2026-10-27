@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import type { AgentName, ConversationReply, FillerKind } from "../api";
-import { useConversation } from "../hooks/useConversation";
+import type { AgentName, FillerKind } from "../api";
+import { useConversation, type Approval, type Delivery } from "../hooks/useConversation";
 import { useMediaQuery } from "../hooks/useMediaQuery";
 import { useVoice, type VoiceEngine } from "../hooks/useVoice";
 import { AgentStage, type Phase } from "./AgentStage";
@@ -29,12 +29,14 @@ export function CallScreen({
   onEnd,
 }: {
   conversation: Conversation;
-  greeting: ConversationReply | null;
+  greeting: Delivery | null;
   voice: boolean;
   engine: VoiceEngine;
   onEnd: () => void;
 }) {
-  const { state, busy, send, answer, markInterrupted } = conversation;
+  /** The customer talks by holding Space or the mic button (hold-to-talk). */
+  const holdToTalk = voice;
+  const { state, busy, send, answer, reveal, revealApproval, markLine } = conversation;
   const wide = useMediaQuery("(min-width: 1200px)");
 
   const [speakAloud, setSpeakAloud] = useState(voice);
@@ -60,6 +62,33 @@ export function CallScreen({
   const voiceRef = useRef(voiceApi);
   voiceRef.current = voiceApi;
   const endCallRef = useRef<() => void>(() => {});
+
+  // Hold-to-talk with the Space bar, anywhere on the page except while typing in the message box.
+  useEffect(() => {
+    if (!holdToTalk) return;
+    const typing = (target: EventTarget | null) =>
+      target instanceof HTMLElement && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
+    const down = (e: KeyboardEvent) => {
+      if (e.code !== "Space" || typing(e.target)) return;
+      e.preventDefault(); // no page scroll, and no "click" on a focused button
+      if (!e.repeat) voiceRef.current.pressTalk();
+    };
+    const up = (e: KeyboardEvent) => {
+      if (e.code !== "Space" || typing(e.target)) return;
+      e.preventDefault();
+      voiceRef.current.releaseTalk();
+    };
+    // Switching windows mid-hold would otherwise leave the mic recording.
+    const release = () => voiceRef.current.releaseTalk();
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup", up);
+    window.addEventListener("blur", release);
+    return () => {
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
+      window.removeEventListener("blur", release);
+    };
+  }, [holdToTalk]);
 
   const fillerTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const pendingRequests = useRef(0);
@@ -88,58 +117,80 @@ export function CallScreen({
   };
 
   /** "checking" while an allowed diagnostic runs on the laptop, otherwise "thinking". */
-  const answerKind = (approve: boolean): FillerKind =>
-    approve && live.current.state.approval?.agent === "troubleshoot" ? "checking" : "thinking";
+  const answerKind = (approve: boolean, approval: Approval | null): FillerKind =>
+    approve && approval?.agent === "troubleshoot" ? "checking" : "thinking";
 
-  /** Plays a reply aloud (or just shows it when muted), then hands the turn back to the customer. */
+  /** An approval the server asked for whose card is not shown yet (the agent is still asking). */
+  const pendingApproval = useRef<Approval | null>(null);
+
+  /**
+   * Plays a reply: its lines join the speaking queue behind anything still being said, and each line appears on
+   * screen as it is spoken. The approval card comes after the agent has finished asking for it.
+   */
   const play = useCallback(
-    async (reply: ConversationReply | null) => {
-      if (!reply || live.current.ended) return;
-      const show = (agent: AgentName, text: string) => {
+    async (delivery: Delivery | null) => {
+      if (!delivery || live.current.ended) return;
+      const { reply, segments, approval } = delivery;
+      if (approval) pendingApproval.current = approval;
+      const showLine = (position: number) => {
+        const segment = segments[position];
+        reveal(segment.entries);
         setTransferring(false);
-        setStageAgent(agent);
-        setCaption(text);
+        setStageAgent(segment.message.agent);
+        setCaption(segment.message.text);
       };
 
-      if (live.current.speakAloud && reply.messages.length > 0) {
-        const result = await voiceRef.current.speak(
-          reply.messages,
-          (line) => show(line.agent, line.text),
-          (to) => {
-            setStageAgent(to);
-            setTransferring(true);
+      if (live.current.speakAloud && segments.length > 0) {
+        const skipped = new Set<number>();
+        const result = await voiceRef.current.say(
+          segments.map((segment) => segment.message),
+          {
+            onLine: (_line, position) => showLine(position),
+            onSkip: (line, position) => {
+              skipped.add(position);
+              showLine(position);
+              markLine(line, "unspoken");
+            },
+            onTransfer: (to) => {
+              setStageAgent(to);
+              setTransferring(true);
+            },
           },
         );
         setTransferring(false);
         if (live.current.ended) return;
         if (result.outcome === "interrupted") {
           // The customer is already talking; the voice engine is capturing what they say.
-          markInterrupted(result.line.index, result.line.text);
+          const position = segments.findIndex((segment) => segment.message === result.line);
+          if (!skipped.has(position)) markLine(result.line, "interrupted");
+          revealApproval(approval);
+          pendingApproval.current = null;
           setStageAgent(reply.activeAgent);
           return;
         }
       } else {
-        const last = reply.messages[reply.messages.length - 1];
-        if (last) show(last.agent, last.text);
+        segments.forEach((_, position) => showLine(position));
       }
 
+      revealApproval(approval);
+      pendingApproval.current = null;
       setStageAgent(reply.activeAgent);
       if (reply.ended) {
         // The customer said goodbye: close the call after a moment, like hanging up.
         setTimeout(() => endCallRef.current(), END_AFTER_GOODBYE_MS);
         return;
       }
-      if (voice && reply.status !== "with_human") voiceRef.current.listen();
     },
-    [markInterrupted, voice],
+    [reveal, revealApproval, markLine],
   );
 
   handleUtterance.current = async (text: string, interrupted: boolean) => {
-    if (live.current.state.approval) {
-      if (YES.test(text)) return play(await withFillers(answerKind(true), answer(true)));
-      if (NO.test(text)) return play(await withFillers("thinking", answer(false)));
+    // Answers the approval even if its card is not on screen yet (the agent was still asking).
+    const approval = live.current.state.approval ?? pendingApproval.current;
+    if (approval) {
+      if (YES.test(text)) return play(await withFillers(answerKind(true, approval), answer(true, approval)));
+      if (NO.test(text)) return play(await withFillers("thinking", answer(false, approval)));
       setCaption('Please say "yes" or "no", or use the buttons.');
-      if (voice) voiceRef.current.listen();
       return;
     }
     play(await withFillers(CREDENTIAL_LIKE.test(text) ? "verifying" : "thinking", send(text, interrupted)));
@@ -174,18 +225,8 @@ export function CallScreen({
     setDraft("");
     const wasSpeaking = voiceApi.speaking;
     if (wasSpeaking) voiceApi.interrupt();
-    voiceApi.cancelListening();
+    voiceApi.cancelTalk();
     handleUtterance.current(text, wasSpeaking);
-  };
-
-  const toggleMic = () => {
-    if (voiceApi.speaking) {
-      // Tap to interrupt: stop the agent and listen straight away.
-      voiceApi.interrupt();
-      return voiceApi.listen();
-    }
-    if (voiceApi.listening) return voiceApi.stopListening();
-    voiceApi.listen();
   };
 
   const toggleSpeakAloud = () => {
@@ -200,7 +241,7 @@ export function CallScreen({
 
   const respond = async (approve: boolean) => {
     voiceApi.stopAll();
-    play(await withFillers(answerKind(approve), answer(approve)));
+    play(await withFillers(answerKind(approve, state.approval), answer(approve)));
   };
 
   const endCall = () => {
@@ -218,15 +259,15 @@ export function CallScreen({
       ? "with_human"
       : transferring
         ? "transferring"
-        : busy || voiceApi.transcribing
-          ? "thinking"
         : voiceApi.speaking
           ? "speaking"
-          : voiceApi.listening
-            ? "listening"
-            : state.approval
-              ? "approval"
-              : "waiting";
+          : busy || voiceApi.transcribing
+            ? "thinking"
+            : voiceApi.holding
+              ? "listening"
+              : state.approval
+                ? "approval"
+                : "waiting";
 
   return (
     <div className="call">
@@ -265,11 +306,11 @@ export function CallScreen({
             caption={caption}
             interim={voiceApi.interim}
             note={voiceApi.fillerText}
-            hearing={voiceApi.hearing}
+            hearing={voiceApi.holding}
             approval={state.approval}
             onAnswer={respond}
             busy={busy}
-            canListen={voice && voiceApi.canListen}
+            canListen={voiceApi.canTalk}
           />
           {wide && (
             <div className="case-wide">
@@ -298,16 +339,36 @@ export function CallScreen({
 
       <footer className="dock">
         {voiceApi.error && <p className="dock-error">{voiceApi.error}</p>}
-        {voice && voiceApi.speaking && <p className="dock-hint">Start talking anytime to interrupt</p>}
+        {voice && !withHuman && (
+          <p className="dock-hint">
+            {voiceApi.holding ? (
+              "Listening... let go to send"
+            ) : (
+              <>
+                Hold <kbd>Space</kbd> or the mic button to talk{voiceApi.speaking ? " (the agent stops right away)" : ""}
+              </>
+            )}
+          </p>
+        )}
         <form className="composer" onSubmit={submit}>
-          {voice && voiceApi.canListen && (
+          {holdToTalk && voiceApi.canTalk && (
             <button
               type="button"
-              className={`mic-btn ${voiceApi.listening ? "on" : ""} ${voiceApi.hearing ? "hearing" : ""}`}
-              onClick={toggleMic}
+              className={`mic-btn ${voiceApi.holding ? "on hearing" : ""}`}
+              // Press and hold: pointer events work for mouse, touch and pen alike.
+              onPointerDown={(e) => {
+                e.currentTarget.setPointerCapture(e.pointerId);
+                voiceApi.pressTalk();
+              }}
+              onPointerUp={() => voiceApi.releaseTalk()}
+              onPointerCancel={() => voiceApi.releaseTalk()}
+              onContextMenu={(e) => e.preventDefault()}
+              onKeyDown={(e) => e.key === "Enter" && !e.repeat && voiceApi.pressTalk()}
+              onKeyUp={(e) => e.key === "Enter" && voiceApi.releaseTalk()}
               disabled={withHuman}
-              aria-label={voiceApi.speaking ? "Interrupt and talk" : voiceApi.listening ? "Stop listening" : "Talk"}
-              title={voiceApi.speaking ? "Interrupt and talk" : voiceApi.listening ? "Stop listening" : "Tap to talk"}
+              aria-label="Hold to talk"
+              aria-pressed={voiceApi.holding}
+              title="Hold to talk (or hold Space)"
             >
               <Icon name="mic" size={20} />
             </button>
@@ -320,10 +381,8 @@ export function CallScreen({
                 ? "A human agent will join shortly..."
                 : state.approval
                   ? 'Type "yes" or "no", or use the buttons above'
-                  : busy
-                    ? "Thinking... you can keep talking or typing"
-                    : voiceApi.listening
-                      ? "Listening... or type here"
+                  : voiceApi.holding
+                    ? "Listening... let go to send"
                     : "Type your message"
             }
             maxLength={2000}
