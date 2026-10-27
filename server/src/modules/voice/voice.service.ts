@@ -45,6 +45,17 @@ export class VoiceService {
     return this.cache.get(key);
   }
 
+  /** Filler phrases are fixed text, so their audio is kept for good (a few dozen short clips at most). */
+  private readonly fillerAudio = new Map<string, Buffer>();
+
+  fillerCached(key: string): Buffer | undefined {
+    return this.fillerAudio.get(key);
+  }
+
+  rememberFiller(key: string, audio: Buffer) {
+    this.fillerAudio.set(key, audio);
+  }
+
   remember(key: string, audio: Buffer) {
     this.cache.set(key, audio);
     if (this.cache.size > MAX_CACHED_LINES) this.cache.delete(this.cache.keys().next().value!);

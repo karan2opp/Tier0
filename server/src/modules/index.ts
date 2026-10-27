@@ -3,6 +3,7 @@ import { ApiResponse, asyncHandler } from "../common";
 import { isDatabaseUp } from "../db/client";
 import conversationRoutes from "./conversations/conversations.routes";
 import troubleshootRoutes from "./troubleshoot/troubleshoot.routes";
+import voiceRoutes from "./voice/voice.routes";
 import { voiceService } from "./voice/voice.service";
 
 const router = Router();
@@ -18,5 +19,6 @@ router.get(
 
 router.use("/conversations", conversationRoutes);
 router.use("/troubleshoot", troubleshootRoutes);
+router.use("/voice", voiceRoutes);
 
 export default router;
