@@ -2,7 +2,10 @@ import { useState } from "react";
 import type { Delivery } from "./hooks/useConversation";
 import { CallScreen } from "./components/CallScreen";
 import { EndScreen } from "./components/EndScreen";
+import { DemoGuide } from "./components/DemoGuide";
 import { Lobby } from "./components/Lobby";
+import { loadDemoChoice, markGuideSkipped, saveDemoChoice, shouldShowGuide, type DemoChoice } from "./demo";
+import { Starfield } from "./components/Starfield";
 import { useConversation } from "./hooks/useConversation";
 import { unlockSpeech } from "./hooks/useSpeech";
 import type { VoiceEngine } from "./hooks/useVoice";
@@ -21,6 +24,8 @@ export default function App() {
   const [engine, setEngine] = useState<VoiceEngine>("browser");
   const [greeting, setGreeting] = useState<Delivery | null>(null);
   const [callKey, setCallKey] = useState(0);
+  const [demo, setDemo] = useState<DemoChoice | null>(loadDemoChoice);
+  const [guideOpen, setGuideOpen] = useState(shouldShowGuide);
 
   const startCall = async (withVoice: boolean, voiceEngine: VoiceEngine = engine) => {
     // Must run inside the click, before any await, or the browser may refuse to speak later.
@@ -33,31 +38,51 @@ export default function App() {
     setGreeting(await conversation.start());
   };
 
-  if (screen === "lobby") {
-    return <Lobby onStart={startCall} starting={conversation.busy} voiceSupported={voiceSupported} />;
-  }
-
-  if (screen === "ended") {
-    return (
-      <EndScreen
-        state={conversation.state}
-        onRestart={() => startCall(voice, engine)}
-        onHome={() => {
-          conversation.reset();
-          setScreen("lobby");
-        }}
-      />
-    );
-  }
-
   return (
-    <CallScreen
-      key={callKey}
-      conversation={conversation}
-      greeting={greeting}
-      voice={voice}
-      engine={engine}
-      onEnd={() => setScreen("ended")}
-    />
+    <>
+      <Starfield />
+      {screen === "lobby" ? (
+        <Lobby
+          onStart={startCall}
+          starting={conversation.busy}
+          voiceSupported={voiceSupported}
+          demo={demo}
+          onOpenGuide={() => setGuideOpen(true)}
+        />
+      ) : screen === "ended" ? (
+        <EndScreen
+          state={conversation.state}
+          onRestart={() => startCall(voice, engine)}
+          onHome={() => {
+            conversation.reset();
+            setScreen("lobby");
+          }}
+        />
+      ) : (
+        <CallScreen
+          key={callKey}
+          conversation={conversation}
+          greeting={greeting}
+          voice={voice}
+          engine={engine}
+          demo={demo}
+          onEnd={() => setScreen("ended")}
+        />
+      )}
+      {screen === "lobby" && guideOpen && (
+        <DemoGuide
+          initial={demo}
+          onChoose={(choice) => {
+            setDemo(choice);
+            saveDemoChoice(choice);
+            setGuideOpen(false);
+          }}
+          onSkip={() => {
+            markGuideSkipped();
+            setGuideOpen(false);
+          }}
+        />
+      )}
+    </>
   );
 }

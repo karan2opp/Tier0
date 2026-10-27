@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import type { AgentName, FillerKind } from "../api";
 import { useConversation, type Approval, type Delivery } from "../hooks/useConversation";
-import { useMediaQuery } from "../hooks/useMediaQuery";
 import { useVoice, type VoiceEngine } from "../hooks/useVoice";
+import type { DemoChoice } from "../demo";
 import { AgentStage, type Phase } from "./AgentStage";
 import { CasePanel } from "./CasePanel";
+import { DemoScript } from "./DemoScript";
+import { Horizon } from "./Horizon";
 import { Icon } from "./Icon";
 import { Transcript } from "./Transcript";
 
@@ -20,31 +22,37 @@ const STILL_DELAY_MS = 7000;
 const END_AFTER_GOODBYE_MS = 1800;
 
 type Conversation = ReturnType<typeof useConversation>;
+type Drawer = "transcript" | "case";
 
 export function CallScreen({
   conversation,
   greeting,
   voice,
   engine,
+  demo,
   onEnd,
 }: {
   conversation: Conversation;
   greeting: Delivery | null;
   voice: boolean;
   engine: VoiceEngine;
+  /** The demo picked in the guide; shown as a small script card during the call. */
+  demo: DemoChoice | null;
   onEnd: () => void;
 }) {
   /** The customer talks by holding Space or the mic button (hold-to-talk). */
   const holdToTalk = voice;
   const { state, busy, send, answer, reveal, revealApproval, markLine } = conversation;
-  const wide = useMediaQuery("(min-width: 1200px)");
 
   const [speakAloud, setSpeakAloud] = useState(voice);
   const [stageAgent, setStageAgent] = useState<AgentName>("front_desk");
   const [caption, setCaption] = useState<string | null>(null);
   /** Set during the short pause while the call is put through to another agent. */
   const [transferring, setTransferring] = useState(false);
-  const [tab, setTab] = useState<"transcript" | "case">("transcript");
+  /** Transcript or case details, opened from the control bar. */
+  const [drawer, setDrawer] = useState<Drawer | null>(null);
+  /** The message box; always open when the customer is not using their voice. */
+  const [typing, setTyping] = useState(!voice);
   const [draft, setDraft] = useState("");
   const [elapsed, setElapsed] = useState(0);
 
@@ -269,92 +277,74 @@ export function CallScreen({
                 ? "approval"
                 : "waiting";
 
+  const lastCustomerLine = [...state.entries].reverse().find((entry) => entry.kind === "customer");
+  const heard = lastCustomerLine?.kind === "customer" ? lastCustomerLine.text : null;
+  const toggleDrawer = (which: Drawer) => setDrawer((open) => (open === which ? null : which));
+
   return (
     <div className="call">
-      <header className="topbar">
-        <div className="brand">
-          <span className="brand-mark">T0</span>
-          <span className="brand-name">Tier0</span>
-          <span className="brand-sub">Laptop support call</span>
-        </div>
-        <div className="topbar-right">
-          {voice && <span className="engine-badge hide-sm">{engine === "openai" ? "OpenAI voice" : "Browser voice"}</span>}
-          <span className="timer">
-            <span className="rec-dot" />
-            {formatTime(elapsed)}
-          </span>
-          <button
-            className="icon-btn"
-            onClick={toggleSpeakAloud}
-            aria-label={speakAloud ? "Mute agent voice" : "Read replies aloud"}
-            title={speakAloud ? "Mute agent voice" : "Read replies aloud"}
-          >
-            <Icon name={speakAloud ? "volume" : "volumeOff"} />
-          </button>
-          <button className="btn btn-danger" onClick={endCall}>
-            <Icon name="phoneOff" size={16} />
-            <span className="hide-sm">End call</span>
+      <header className="call-top">
+        <span className="timer-pill">
+          <span className="live-dot" />
+          {formatTime(elapsed)}
+        </span>
+        <span className="call-title hide-sm">Tier0 · Laptop support</span>
+        <div className="top-actions">
+          {voice && <span className="engine-tag hide-sm">{engine === "openai" ? "OpenAI voice" : "Browser voice"}</span>}
+          <button className="end-btn" onClick={endCall}>
+            <Icon name="phoneOff" size={14} />
+            End call
           </button>
         </div>
       </header>
 
-      <main className="call-grid">
-        <div className="stage-col">
-          <AgentStage
-            agent={withHuman && !voiceApi.speaking ? "human_agent" : stageAgent}
-            phase={phase}
-            caption={caption}
-            interim={voiceApi.interim}
-            note={voiceApi.fillerText}
-            hearing={voiceApi.holding}
-            approval={state.approval}
-            onAnswer={respond}
-            busy={busy}
-            canListen={voiceApi.canTalk}
-          />
-          {wide && (
-            <div className="case-wide">
-              <CasePanel state={state} />
-            </div>
-          )}
-        </div>
-
-        <aside className="side">
-          {!wide && (
-            <div className="tabs" role="tablist">
-              <button role="tab" aria-selected={tab === "transcript"} onClick={() => setTab("transcript")}>
-                Transcript
-              </button>
-              <button role="tab" aria-selected={tab === "case"} onClick={() => setTab("case")}>
-                Case {state.verified && <span className="tab-dot" />}
-              </button>
-            </div>
-          )}
-          {wide && <div className="side-title">Transcript</div>}
-          <div className="side-body">
-            {wide || tab === "transcript" ? <Transcript entries={state.entries} busy={busy} /> : <CasePanel state={state} />}
-          </div>
-        </aside>
+      <main className="call-main">
+        {demo && <DemoScript demo={demo} />}
+        <AgentStage
+          agent={withHuman && !voiceApi.speaking ? "human_agent" : stageAgent}
+          phase={phase}
+          caption={caption}
+          heard={heard}
+          interim={voiceApi.interim}
+          note={voiceApi.fillerText}
+          approval={state.approval}
+          onAnswer={respond}
+          busy={busy}
+          canListen={voiceApi.canTalk}
+        />
       </main>
 
-      <footer className="dock">
+      <Horizon />
+
+      <footer className="call-dock">
         {voiceApi.error && <p className="dock-error">{voiceApi.error}</p>}
-        {voice && !withHuman && (
-          <p className="dock-hint">
-            {voiceApi.holding ? (
-              "Listening... let go to send"
-            ) : (
-              <>
-                Hold <kbd>Space</kbd> or the mic button to talk{voiceApi.speaking ? " (the agent stops right away)" : ""}
-              </>
-            )}
-          </p>
+        {typing && (
+          <form className="type-bar" onSubmit={submit}>
+            <input
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              placeholder={
+                withHuman
+                  ? "The call has been passed to a human agent"
+                  : state.approval
+                    ? 'Type "yes" or "no", or use the buttons above'
+                    : "Type your message"
+              }
+              maxLength={2000}
+              aria-label="Message"
+              autoFocus
+            />
+            <button type="submit" className="send-btn" disabled={!draft.trim()} aria-label="Send">
+              <Icon name="send" size={16} />
+            </button>
+          </form>
         )}
-        <form className="composer" onSubmit={submit}>
+
+        <div className="controls" role="toolbar" aria-label="Call controls">
           {holdToTalk && voiceApi.canTalk && (
             <button
               type="button"
-              className={`mic-btn ${voiceApi.holding ? "on hearing" : ""}`}
+              className={`ctrl ctrl-mic ${voiceApi.holding ? "is-holding" : ""}`}
               // Press and hold: pointer events work for mouse, touch and pen alike.
               onPointerDown={(e) => {
                 e.currentTarget.setPointerCapture(e.pointerId);
@@ -370,29 +360,76 @@ export function CallScreen({
               aria-pressed={voiceApi.holding}
               title="Hold to talk (or hold Space)"
             >
-              <Icon name="mic" size={20} />
+              <Icon name="mic" size={18} />
             </button>
           )}
-          <input
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder={
-              withHuman
-                ? "A human agent will join shortly..."
-                : state.approval
-                  ? 'Type "yes" or "no", or use the buttons above'
-                  : voiceApi.holding
-                    ? "Listening... let go to send"
-                    : "Type your message"
-            }
-            maxLength={2000}
-            aria-label="Message"
-          />
-          <button type="submit" className="send-btn" disabled={!draft.trim()} aria-label="Send">
-            <Icon name="send" size={18} />
+          <button
+            type="button"
+            className="ctrl"
+            aria-pressed={typing}
+            onClick={() => setTyping((open) => !open)}
+            aria-label="Type a message"
+            title="Type a message"
+          >
+            <Icon name="keyboard" size={18} />
           </button>
-        </form>
+          <button
+            type="button"
+            className="ctrl"
+            aria-pressed={drawer === "transcript"}
+            onClick={() => toggleDrawer("transcript")}
+            aria-label="Transcript"
+            title="Transcript"
+          >
+            <Icon name="message" size={18} />
+          </button>
+          <button
+            type="button"
+            className="ctrl"
+            aria-pressed={drawer === "case"}
+            onClick={() => toggleDrawer("case")}
+            aria-label="Case details"
+            title="Case details"
+          >
+            <Icon name="clipboard" size={18} />
+            {state.verified && <span className="ctrl-dot" />}
+          </button>
+          <button
+            type="button"
+            className="ctrl"
+            aria-pressed={!speakAloud}
+            onClick={toggleSpeakAloud}
+            aria-label={speakAloud ? "Mute agent voice" : "Read replies aloud"}
+            title={speakAloud ? "Mute agent voice" : "Read replies aloud"}
+          >
+            <Icon name={speakAloud ? "volume" : "volumeOff"} size={18} />
+          </button>
+        </div>
+
+        {holdToTalk && voiceApi.canTalk && !withHuman && (
+          <p className="dock-hint">
+            {voiceApi.holding ? (
+              "Listening... let go to send"
+            ) : (
+              <>
+                Hold <kbd>Space</kbd> or the mic to talk{voiceApi.speaking ? " · the agent stops right away" : ""}
+              </>
+            )}
+          </p>
+        )}
       </footer>
+
+      <aside className={`drawer ${drawer ? "open" : ""}`} aria-hidden={!drawer} aria-label={drawer === "case" ? "Case details" : "Transcript"}>
+        <header className="drawer-head">
+          <span>{drawer === "case" ? "Case details" : "Transcript"}</span>
+          <button className="ctrl ctrl-sm" onClick={() => setDrawer(null)} aria-label="Close">
+            <Icon name="x" size={16} />
+          </button>
+        </header>
+        <div className="drawer-body">
+          {drawer === "case" ? <CasePanel state={state} /> : <Transcript entries={state.entries} busy={busy} />}
+        </div>
+      </aside>
     </div>
   );
 }

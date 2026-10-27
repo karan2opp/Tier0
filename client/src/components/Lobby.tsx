@@ -3,15 +3,8 @@ import { AGENTS } from "../agents";
 import { useSpeech } from "../hooks/useSpeech";
 import type { VoiceEngine } from "../hooks/useVoice";
 import { api, type AgentName } from "../api";
+import type { DemoChoice } from "../demo";
 import { Icon } from "./Icon";
-
-/** Seeded demo customers, so anyone can try a full call. */
-const DEMO_ACCOUNTS = [
-  { name: "Aarav", phone: "9000000001", serial: "NHQN4SI00134501", try: "Warranty, or \"my laptop is slow\"" },
-  { name: "Ananya", phone: "9000000004", serial: "PF4KX9ZD", try: "\"Can I move my pickup?\"" },
-  { name: "Vikram", phone: "9000000005", serial: "R6NRCX03A114", try: "\"When will my laptop be delivered?\"" },
-  { name: "Rohan", phone: "9000000003", serial: "5CD2419XKQ", try: "\"Why is my repair taking so long?\"" },
-];
 
 const ROUTE: AgentName[] = ["front_desk", "troubleshoot", "status", "human_agent"];
 
@@ -19,21 +12,42 @@ export function Lobby({
   onStart,
   starting,
   voiceSupported,
+  demo,
+  onOpenGuide,
 }: {
   onStart: (voice: boolean, engine: VoiceEngine) => void;
   starting: boolean;
+  /** The demo account and issue picked in the guide, if any. */
+  demo: DemoChoice | null;
+  onOpenGuide: () => void;
   /** The browser has its own speech recognition and synthesis (Chrome, Edge). */
   voiceSupported: boolean;
 }) {
   const micSupported = typeof navigator !== "undefined" && Boolean(navigator.mediaDevices?.getUserMedia);
   const [voice, setVoice] = useState(voiceSupported || micSupported);
-  const [engine, setEngine] = useState<VoiceEngine>("browser");
   const [openaiVoice, setOpenaiVoice] = useState(false);
-  const [copied, setCopied] = useState<string | null>(null);
+  /** OpenAI voice whenever the server can provide it; the browser's own voice otherwise. */
+  const engine: VoiceEngine = openaiVoice ? "openai" : "browser";
   const speech = useSpeech(() => {});
-  const testVoice = () => {
-    speech.cancelSpeech();
-    speech.speak("Hi, this is Tier0 support. If you can hear me, your sound is working.", AGENTS.front_desk);
+  const [testing, setTesting] = useState(false);
+
+  /** Plays a short sample in the voice the call will use. */
+  const testVoice = async () => {
+    setTesting(true);
+    try {
+      if (engine === "openai") {
+        const sample = new Audio(api.fillerUrl("front_desk", "thinking", 0));
+        await new Promise<void>((resolve) => {
+          sample.onended = sample.onerror = () => resolve();
+          sample.play().catch(() => resolve());
+        });
+      } else {
+        speech.cancelSpeech();
+        await speech.speak("Hi, this is Tier0 support. If you can hear me, your sound is working.", AGENTS.front_desk);
+      }
+    } finally {
+      setTesting(false);
+    }
   };
   const [health, setHealth] = useState<"checking" | "ok" | "db_down" | "offline">("checking");
 
@@ -43,25 +57,12 @@ export function Lobby({
       .health()
       .then((h) => {
         setHealth(h.database === "up" ? "ok" : "db_down");
-        const available = Boolean(h.voice?.openai) && micSupported;
-        setOpenaiVoice(available);
-        // Without the browser's own speech, OpenAI voice is the only way to talk.
-        if (!voiceSupported && available) setEngine("openai");
+        setOpenaiVoice(Boolean(h.voice?.openai) && micSupported);
       })
       .catch(() => setHealth("offline"));
   }, [micSupported, voiceSupported]);
 
   const canUseVoice = voiceSupported || openaiVoice;
-
-  const copy = async (value: string) => {
-    try {
-      await navigator.clipboard.writeText(value);
-      setCopied(value);
-      setTimeout(() => setCopied((c) => (c === value ? null : c)), 1400);
-    } catch {
-      // Clipboard can be blocked; the value is visible anyway.
-    }
-  };
 
   return (
     <div className="lobby">
@@ -70,7 +71,7 @@ export function Lobby({
           <span className="live-dot" /> AI support line · open now
         </span>
         <h1>
-          Laptop trouble? <span className="grad">Talk to Tier0.</span>
+          Laptop trouble? Talk to Tier0.
         </h1>
         <p className="lede">
           No hold music, no phone number. Speak to our AI support desk right here in your browser. It checks your
@@ -128,45 +129,22 @@ export function Lobby({
           <span>
             Use my voice
             <small>
-              {canUseVoice
-                ? "Hold Space or the mic button to talk; the agent stops the moment you do. Your browser will ask for the microphone."
-                : "Voice needs Chrome or Edge here; you can type instead"}
+              {canUseVoice ? (
+                <>
+                  Hold the <kbd>Space</kbd> button to speak, or press and hold the <Icon name="mic" size={12} className="inline-icon" />{" "}
+                  mic button. Let go to send. Your browser will ask for the microphone.
+                </>
+              ) : (
+                "Voice needs Chrome or Edge here; you can type instead"
+              )}
             </small>
           </span>
         </label>
 
-        {voice && canUseVoice && (
-          <div className="engine-picker" role="radiogroup" aria-label="Voice">
-            <button
-              type="button"
-              role="radio"
-              aria-checked={engine === "browser"}
-              className="engine-option"
-              disabled={!voiceSupported}
-              onClick={() => setEngine("browser")}
-            >
-              <strong>Browser voice</strong>
-              <small>{voiceSupported ? "Free · built into Chrome and Edge" : "Not available in this browser"}</small>
-            </button>
-            <button
-              type="button"
-              role="radio"
-              aria-checked={engine === "openai"}
-              className="engine-option"
-              disabled={!openaiVoice}
-              onClick={() => setEngine("openai")}
-            >
-              <strong>OpenAI voice</strong>
-              <small>{openaiVoice ? "Natural voices · about 3¢ per call" : "Needs an OpenAI key on the server"}</small>
-            </button>
-          </div>
-        )}
-
-
-        {speech.canSpeak && (
+        {(engine === "openai" || speech.canSpeak) && (
           <div className="sound-test">
-            <button type="button" className="btn btn-ghost" onClick={testVoice} disabled={speech.speaking}>
-              <Icon name="volume" size={16} /> {speech.speaking ? "Playing..." : "Test speakers"}
+            <button type="button" className="btn btn-ghost" onClick={testVoice} disabled={testing}>
+              <Icon name="volume" size={16} /> {testing ? "Playing..." : "Test speakers"}
             </button>
             <small>{speech.voiceError ?? "Check that you can hear the agent before you start."}</small>
           </div>
@@ -180,6 +158,17 @@ export function Lobby({
           </p>
         )}
 
+        <div className="demo-choice">
+          <div>
+            <small>{demo ? "Your demo" : "New here?"}</small>
+            <strong>{demo ? `${demo.account.name} · ${demo.issue.title}` : "Pick a demo account and an issue to try"}</strong>
+            {demo && <span>"{demo.issue.say}"</span>}
+          </div>
+          <button type="button" className="btn btn-ghost" onClick={onOpenGuide}>
+            {demo ? "Change" : "Show guide"}
+          </button>
+        </div>
+
         <button
           className="btn btn-primary btn-lg"
           onClick={() => onStart(voice && canUseVoice, engine)}
@@ -189,24 +178,6 @@ export function Lobby({
           {starting ? "Connecting..." : "Start support call"}
         </button>
 
-        <details className="demo">
-          <summary>Demo accounts</summary>
-          <p>Say or type the phone number and S/N when the front desk asks.</p>
-          <div className="demo-list">
-            {DEMO_ACCOUNTS.map((account) => (
-              <div className="demo-row" key={account.phone}>
-                <strong>{account.name}</strong>
-                <button className="chip" onClick={() => copy(account.phone)} title="Copy phone number">
-                  {account.phone} <Icon name={copied === account.phone ? "check" : "copy"} size={12} />
-                </button>
-                <button className="chip" onClick={() => copy(account.serial)} title="Copy serial number">
-                  {account.serial} <Icon name={copied === account.serial ? "check" : "copy"} size={12} />
-                </button>
-                <small>{account.try}</small>
-              </div>
-            ))}
-          </div>
-        </details>
       </section>
     </div>
   );

@@ -1,5 +1,6 @@
 import { AGENTS } from "../agents";
 import type { AgentName, ApprovalItem } from "../api";
+import { AgentAvatar } from "./AgentAvatar";
 import { ApprovalCard } from "./ApprovalCard";
 import { Icon } from "./Icon";
 
@@ -15,22 +16,26 @@ export type Phase =
 
 const PHASE_LABEL: Record<Phase, string> = {
   connecting: "Connecting",
+  transferring: "Transferring",
   speaking: "Speaking",
   listening: "Listening",
   thinking: "Thinking",
   waiting: "Your turn",
   approval: "Waiting for your OK",
-  with_human: "Transferring to a person",
-  transferring: "Connecting",
+  with_human: "Human agent",
 };
 
+/**
+ * The call stage: the agent's current line as text on the left, with a status pill under it, and the agent
+ * itself on the right as a ringed planet in its own colour.
+ */
 export function AgentStage({
   agent,
   phase,
   caption,
+  heard,
   interim,
   note,
-  hearing,
   approval,
   onAnswer,
   busy,
@@ -39,11 +44,11 @@ export function AgentStage({
   agent: AgentName;
   phase: Phase;
   caption: string | null;
+  /** What the customer just said, shown while the agent works on it. */
+  heard: string | null;
   interim: string;
   /** What the agent is saying while it works ("Let me check that for you."). */
   note?: string | null;
-  /** The customer's voice is being picked up right now. */
-  hearing: boolean;
   approval: { agent: AgentName; items: ApprovalItem[] } | null;
   onAnswer: (approve: boolean) => void;
   busy: boolean;
@@ -51,65 +56,57 @@ export function AgentStage({
 }) {
   const meta = AGENTS[agent];
 
+  const line =
+    phase === "listening"
+      ? interim || "Listening... let go to send"
+      : phase === "transferring"
+        ? `Connecting you to our ${meta.name.toLowerCase()}...`
+        : phase === "thinking"
+          ? note || caption
+          : caption;
+
   return (
-    <section
-      className="stage"
-      data-phase={phase}
-      data-hearing={hearing || undefined}
-      style={{ ["--agent" as string]: meta.color }}
-    >
-      <div className="stage-glow" />
-
-      <header className="stage-head">
-        <span className="ai-badge">AI</span>
-        <span className="stage-agent">{meta.name}</span>
-        <span className={`phase-pill phase-${phase}`}>
-          <span className="phase-dot" />
+    <section className="stage" data-phase={phase} style={{ ["--agent" as string]: meta.color }}>
+      <div className="stage-copy">
+        {phase === "thinking" && heard && (
+          <p className="stage-heard">
+            <span>You</span>
+            {heard}
+          </p>
+        )}
+        <div className="speaker">
+          <span className="speaker-icon">
+            <Icon name={meta.icon} size={14} />
+          </span>
+          <span className="speaker-name">{meta.name}</span>
+          <span className="ai-tag">{agent === "human_agent" ? "Line" : "AI"}</span>
+        </div>
+        <p className={`stage-line ${phase === "listening" ? "is-you" : ""}`} aria-live="polite" key={line ?? ""}>
+          {line ?? ""}
+        </p>
+        <span className="status-pill">
+          <span className="status-dots" aria-hidden="true">
+            <i />
+            <i />
+            <i />
+          </span>
           {PHASE_LABEL[phase]}
+          {phase === "thinking" && canListen && <small>Hold Space to add something</small>}
         </span>
-      </header>
-
-      <div className="orb-wrap" aria-hidden="true">
-        <div className="orb-ring r1" />
-        <div className="orb-ring r2" />
-        <div className="orb-ring r3" />
-        <div className="orb">
-          <Icon name={meta.icon} size={44} />
-        </div>
-        <div className="bars">
-          {Array.from({ length: 5 }, (_, i) => (
-            <span key={i} style={{ animationDelay: `${i * 0.12}s` }} />
-          ))}
-        </div>
       </div>
 
-      <p className="stage-role">{meta.role}</p>
-
-      <div className="caption" aria-live="polite">
-        {phase === "listening" ? (
-          <p className="caption-you">
-            <span>You</span>
-            {interim || "Listening... let go to send"}
-          </p>
-        ) : phase === "transferring" ? (
-          <p className="caption-transfer">Connecting you to our {meta.name.toLowerCase()}...</p>
-        ) : phase === "thinking" && (hearing || interim) ? (
-          <p className="caption-you">
-            <span>You, adding</span>
-            {interim || "Hearing you..."}
-          </p>
-        ) : phase === "thinking" ? (
-          <div className="caption-thinking">
-            <span className="typing">
-              <i />
-              <i />
-              <i />
-            </span>
-            {note ? <span className="caption-note">{note}</span> : canListen && <small>Thinking. Hold Space to add something.</small>}
-          </div>
-        ) : (
-          caption && <p className="caption-agent">{caption}</p>
-        )}
+      <div className="agent-tile">
+        <span className="tile-live">
+          <span className="tile-live-dot" />
+          {agent === "human_agent" ? "Human line" : "AI agent"}
+        </span>
+        <div className="avatar-wrap" key={agent}>
+          <AgentAvatar agent={agent} />
+        </div>
+        <div className="tile-caption">
+          <span className="tile-name">{meta.name}</span>
+          <span className="tile-role">{meta.role}</span>
+        </div>
       </div>
 
       {approval && (
