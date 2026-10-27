@@ -7,6 +7,8 @@
  * out of the speakers is less likely to count as the customer interrupting.
  */
 
+import { END_OF_TURN_MS } from "./turnTaking";
+
 const WORKLET = `
 class Tier0MicTap extends AudioWorkletProcessor {
   constructor() { super(); this.buf = new Float32Array(1024); this.n = 0; }
@@ -29,7 +31,7 @@ const MIN_THRESHOLD = 0.012;
 const START_MS = 150;
 const GUARDED_START_MS = 320;
 const GUARDED_FACTOR = 2.6;
-const END_SILENCE_MS = 900;
+const END_SILENCE_MS = END_OF_TURN_MS;
 const MAX_SEGMENT_MS = 25_000;
 const MIN_SPEECH_MS = 300;
 const TARGET_RATE = 16_000;

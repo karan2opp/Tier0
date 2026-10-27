@@ -131,24 +131,34 @@ export function useConversation() {
     }
   }, [apply, fail]);
 
+  /** Messages sent but not answered yet. */
+  const sending = useRef(0);
+
+  /**
+   * Sends a message, even while the last one is still being answered: the server then answers both together,
+   * and the reply to the earlier one comes back "superseded" and is ignored here.
+   */
   const send = useCallback(
     async (text: string, interrupted = false): Promise<ConversationReply | null> => {
       const message = text.trim();
-      if (!message || !state.sessionId || busy) return null;
+      if (!message || !state.sessionId) return null;
       addEntries([{ id: id(), kind: "customer", text: message, private: CREDENTIALS.test(message) }]);
+      sending.current += 1;
       setBusy(true);
       try {
         const reply = await api.send(state.sessionId, message, interrupted);
+        if (reply.status === "superseded") return null;
         apply(reply);
         return reply;
       } catch (err) {
         fail(err);
         return null;
       } finally {
-        setBusy(false);
+        sending.current -= 1;
+        if (sending.current === 0) setBusy(false);
       }
     },
-    [state.sessionId, busy, addEntries, apply, fail],
+    [state.sessionId, addEntries, apply, fail],
   );
 
   const answer = useCallback(

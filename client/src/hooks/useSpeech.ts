@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentMeta } from "../agents";
+import { END_OF_TURN_MS, isUnfinished, UNFINISHED_PAUSE_MS } from "../audio/turnTaking";
 
 /* Minimal typings: the Web Speech recognition API is not in TypeScript's DOM lib. */
 interface RecognitionResult {
@@ -76,34 +77,63 @@ export function useSpeech(onFinal: (text: string) => void) {
     };
   }, [canSpeak]);
 
+  /** Keep listening across sentences (and while the agent thinks) until told to stop. */
+  const keepListening = useRef(false);
+  /** Sends what has been heard so far, if anything. Set while a recognition session runs. */
+  const flushHeard = useRef<(() => void) | null>(null);
+
+  /**
+   * Listens continuously. Each time the customer pauses long enough (longer when they stopped mid-sentence),
+   * what they said is sent, and listening carries on, so they can add more while the agent is thinking.
+   */
   const listen = useCallback(() => {
-    if (!Ctor || recognition.current) return;
+    if (!Ctor) return;
+    keepListening.current = true;
+    if (recognition.current) return;
+
     const rec = new Ctor();
     rec.lang = "en-IN";
     rec.interimResults = true;
-    rec.continuous = false;
-    let finalText = "";
+    rec.continuous = true;
+    let heard = "";
+    let pending = "";
+    let pause: ReturnType<typeof setTimeout> | undefined;
+
+    const flush = () => {
+      clearTimeout(pause);
+      const text = `${heard} ${pending}`.trim();
+      heard = "";
+      pending = "";
+      setInterim("");
+      if (text) onFinalRef.current(text);
+    };
+    flushHeard.current = flush;
 
     rec.onresult = (event) => {
-      let pending = "";
+      pending = "";
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const result = event.results[i];
-        if (result.isFinal) finalText += result[0].transcript;
+        if (result.isFinal) heard = `${heard} ${result[0].transcript}`.trim();
         else pending += result[0].transcript;
       }
-      setInterim((finalText + pending).trim());
+      const sofar = `${heard} ${pending}`.trim();
+      setInterim(sofar);
+      clearTimeout(pause);
+      pause = setTimeout(flush, isUnfinished(sofar) ? UNFINISHED_PAUSE_MS : END_OF_TURN_MS);
     };
     rec.onerror = (event) => {
       if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+        keepListening.current = false;
         setMicError("Microphone access is blocked. Allow it in your browser, or type instead.");
       }
     };
     rec.onend = () => {
       recognition.current = null;
-      setListening(false);
-      setInterim("");
-      const text = finalText.trim();
-      if (text) onFinalRef.current(text);
+      flushHeard.current = null;
+      flush();
+      // Chrome ends long sessions now and then; quietly start again if we are still meant to listen.
+      if (keepListening.current) setTimeout(() => keepListening.current && listenRef.current(), 150);
+      else setListening(false);
     };
 
     recognition.current = rec;
@@ -113,20 +143,29 @@ export function useSpeech(onFinal: (text: string) => void) {
       rec.start();
     } catch {
       recognition.current = null;
+      flushHeard.current = null;
       setListening(false);
     }
   }, [Ctor]);
+  const listenRef = useRef(listen);
+  listenRef.current = listen;
 
   /** Stops listening and sends what was heard. */
-  const stopListening = useCallback(() => recognition.current?.stop(), []);
+  const stopListening = useCallback(() => {
+    keepListening.current = false;
+    flushHeard.current?.();
+    recognition.current?.stop();
+  }, []);
 
   /** Stops listening and throws away what was heard. */
   const abortListening = useCallback(() => {
+    keepListening.current = false;
     const rec = recognition.current;
     if (!rec) return;
     rec.onend = null;
     rec.abort();
     recognition.current = null;
+    flushHeard.current = null;
     setListening(false);
     setInterim("");
   }, []);
